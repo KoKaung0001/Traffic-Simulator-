@@ -30,6 +30,8 @@ class Vehicle:
     index: int = 0
     speed: float = 0.0
     permit: str | None = None
+    unsafe_entry: bool = False
+    entry_reason: str = ''
     waiting: float = 0.0
     action: str = 'stop'
     reason: str = 'awaiting_observation'
@@ -88,7 +90,7 @@ class Vehicle:
 
     @property
     def desired_speed(self):
-        return self.spec.cruise*self.driver.speed_factor*self.speed_variation
+        return min(self.spec.cruise*1.8,self.spec.cruise*self.driver.speed_factor*self.speed_variation) if self.driver.reckless else self.spec.cruise*self.driver.speed_factor*self.speed_variation
 
     @property
     def path_id(self):
@@ -130,6 +132,7 @@ class Simulation:
         from collections import Counter
         self.lane_counts=Counter();self.lane_events=[];self.event_feed=deque(maxlen=5)
         self.merge_owners={}
+        self.junction_events=[];self.quota_admissions=0
         from .timing import Timings
         self.timings=Timings();self.previous_poses={}
         self.overlay='None'
@@ -165,6 +168,10 @@ class Simulation:
                         ticket=TripRequest('Depot' if kind == 'Truck' else ticket.origin,
                                            ticket.destination if ticket.destination != 'Depot' else 'Offices',kind,ticket.profile)
                     ticket=TripRequest(ticket.origin,ticket.destination,ticket.vehicle,choose(self.rng,profile_weights(self.scenario,ticket.origin,self.clock)))
+                    from .night import enabled,counts
+                    if enabled(self):
+                        ticket=TripRequest(ticket.origin,ticket.destination,ticket.vehicle,
+                            'Drunk' if counts(self)['active']<counts(self)['target'] else choose(self.rng,{'Normal':.8,'Newbie':.2}))
                     v=self._make_vehicle(ticket)
                     if v is None:
                         continue
@@ -211,6 +218,8 @@ class Simulation:
         v=Vehicle(self.next_id,route,self.network.access[ticket.origin].s,self.rng.randrange(6),
                   driver=sample_driver(ticket.profile,self.rng if self.initializing else self.driver_rng),spec=spec,origin=ticket.origin,
                   destination=ticket.destination,end_s=self.network.access[ticket.destination].s)
+        from .night import driver
+        v.driver=driver(self,v.driver,self.rng if self.initializing else self.driver_rng)
         v.behaviour_rng=random.Random(self.seed*1000003+v.id)
         self.next_id+=1
         return v
@@ -224,9 +233,13 @@ class Simulation:
         backlog=max(self.pending,len([name for name in self.network.access if not name.endswith('exit')])) if four and self.target else self.pending
         while not four and len(self.queued)>self.pending:
             self.queued.pop()
+        from .night import enabled,counts,ticket as night_ticket
+        quota=counts(self)
+        if enabled(self):backlog=max(backlog,len(self.queued)+max(0,quota['target']-quota['active']-quota['pending']))
         for _ in range(max(0,backlog-len(self.queued))):
             for attempt in range(30):
                 ticket=request(self.rng,self.scenario,self.clock,gates=self.network.gates,queued=self.queued,peripheral=self.network.peripheral)
+                if enabled(self):ticket=night_ticket(self,ticket)
                 if ticket.vehicle == 'Bus' and sum(v.spec.kind == 'Bus' for v in list(self.vehicles)+list(self.queued)) >= PARAMETERS['max_buses']:
                     continue
                 v=self._make_vehicle(ticket)
@@ -235,6 +248,16 @@ class Simulation:
                     self.queued.append(v)
                     break
         admitted=0
+        if enabled(self) and quota['active']<quota['target']:
+            # Three priority slots, then one oldest non-quota slot, when both are clear.
+            drunk=deque(v for v in sorted(self.queued,key=lambda v:v.queued_since) if v.driver.kind=='Drunk')
+            other=deque(v for v in sorted(self.queued,key=lambda v:v.queued_since) if v.driver.kind!='Drunk')
+            order=[]
+            while drunk or other:
+                for _ in range(3):
+                    if drunk:order.append(drunk.popleft())
+                if other:order.append(other.popleft())
+            self.queued=deque(order)
         for _ in range(len(self.queued)):
             v=self.queued.popleft()
             v.spawn_block=self.supervisor.spawn_reason(self.network,v,self.vehicles)
@@ -245,6 +268,7 @@ class Simulation:
                 self.metrics.enter(v,self.network)
                 self.behaviour_audit.admit(v)
                 admitted+=1
+                self.quota_admissions+=1
                 self.flow_audit.admissions[v.origin]+=1
                 self.flow_audit.waits.append(self.elapsed-v.queued_since)
             else:
@@ -384,7 +408,7 @@ class Simulation:
     def _decide(self, snapshot):
         net = self.network
         self.observation_poses={v.id:self.pose(v) for v,_,_ in snapshot}
-        reservations = [(v, v.permit) for v, _, _ in snapshot if v.permit]
+        reservations = [(v, v.permit) for v, _, _ in snapshot if v.permit and not v.unsafe_entry]
         candidates = []
         for v, pid, s in snapshot:
             path = net.paths[pid]
@@ -452,7 +476,10 @@ class Simulation:
                     self.supervisor.record(v,intervention)
                 else:
                     v.permit=connector.id
-                    reservations.append((v,connector.id))
+                    v.unsafe_entry=self.mode=='accident' and v.reason in ('signal_violation','unsafe_gap_accepted')
+                    v.entry_reason=v.reason
+                    self.junction_events.append(dict(time=self.elapsed,id=v.id,stage='permission',path=connector.id,kind=connector.kind,signal=signal,reason=v.reason,conflicts=list(conflicts),unsafe=v.unsafe_entry))
+                    if not v.unsafe_entry:reservations.append((v,connector.id))
 
     def _proposal(self,v,observation,larger_gap):
         if v.driver.kind!='Normal':
@@ -490,7 +517,9 @@ class Simulation:
         if v.contact_pose is not None:return v.contact_pose
         index=v.index
         while s>self.network.paths[v.route[index]].length and index<len(v.route)-1:
-            s-=self.network.paths[v.route[index]].length
+            path=self.network.paths[v.route[index]]
+            s-=path.length
+            s+=getattr(path,'resume_s',0.)
             index+=1
         return self.network.paths[v.route[index]].pose(s)
 
@@ -526,6 +555,7 @@ class Simulation:
                 v.waiting = 0.
             if v.permit and v.path_id == self.network.paths[v.permit].outgoing and v.s >= v.spec.length/2+.75:
                 v.permit = None
+                v.unsafe_entry=False
         snapshot = [(v, v.path_id, v.s) for v in self.vehicles]
         four=getattr(self.network,'lane_count',2)==4
         if four:
@@ -607,13 +637,13 @@ class Simulation:
                 if v.manoeuvre:
                     # The Prolog passing state authorizes motion around the leader.
                     target=cruise
-                    if v.manoeuvre_mode=='wrong_way':target=min(target,PARAMETERS['wrong_way']['speed'])
+                    if v.manoeuvre_mode=='wrong_way':target=min(target,PARAMETERS['reckless_night']['wrong_way_speed'] if v.driver.reckless else PARAMETERS['wrong_way']['speed'])
                     if v.passing_reason in ('overtaking_late_braking','wrong_way_braking'):target=0.
                     v.control_reason=v.passing_reason
                     remaining=p.length-v.s
                     if not v.manoeuvre['returning']:
                         target=min(target,math.sqrt(2*v.spec.braking*max(0.,remaining-1)))
-                motor=1. if v.control=='accelerate' else min(1.,v.driver.acceleration)
+                motor=min(1.6,v.driver.acceleration) if v.driver.reckless else 1. if v.control=='accelerate' else min(1.,v.driver.acceleration)
                 deceleration=v.spec.braking*v.driver.braking
                 if v.driver.kind=='Newbie' and v.control=='brake':deceleration=v.spec.braking
                 # Destinations and scheduled stops are known service locations.
@@ -656,6 +686,7 @@ class Simulation:
                 p=self.network.paths[v.path_id]
                 if p.kind=='lane' and not v.manoeuvre and v.index+1<len(v.route) and v.route[v.index+1] in self.network.connectors and not v.permit and v.s>=p.length-v.spec.length/2:
                     v.permit=v.route[v.index+1]
+                    v.unsafe_entry=True;v.entry_reason=v.reason
                     cp=self.network.paths[v.permit]
                     if cp.kind=='signal' and self.signals[cp.junction].light(cp.approach)=='red':
                         occupied=any(w is not v and w.permit and
@@ -674,9 +705,15 @@ class Simulation:
                 previous=v.path_id
                 v.index += 1
                 if four:lane_changes.transition(self,v,previous)
+                cp=self.network.paths[v.path_id]
+                if cp.kind in ('signal','roundabout'):
+                    signal=self.signals[cp.junction].light(cp.approach) if cp.kind=='signal' else 'yield'
+                    self.junction_events.append(dict(time=self.elapsed,id=v.id,stage='crossed',path=cp.id,kind=cp.kind,signal=signal,reason=v.entry_reason,unsafe=v.unsafe_entry,position=self.pose(v)))
+                    if signal=='red' or v.unsafe_entry:
+                        self.event_feed.append(dict(time=self.elapsed,id=v.id,kind='red_light' if signal=='red' else 'failed_yield',stage='entry'))
                 self.metrics.enter(v,self.network)
         self.remove_vehicles(finished,'trip_completion')
-        if self.ticks % DECISION_STEPS == 0 and self.pending:
+        if self.ticks % DECISION_STEPS == 0 and (self.pending or (self.scenario=='Evening/night' and four)):
             self._admit_demand()
         self.ticks += 1
         self.elapsed = self.ticks*STEP

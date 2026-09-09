@@ -57,6 +57,10 @@ class CityView:
         self.wheel_mesh = Cylinder(resolution=12, start=-.5)
         self.disk = capped_disk()
         cube(pos=(0, -1, 0), scale=(network.extent*2, 2, network.extent*2), tint='#8fb77a')
+        four=getattr(network,'lane_count',2)==4
+        if four:
+            from .road_surface import draw
+            self.paved=draw(network)
         drawn = set()
         for lane in network.lanes.values():
             edge = tuple(sorted((lane.source, lane.target)))
@@ -69,18 +73,20 @@ class CityView:
             root = Entity(position=((a[0]+b[0])/2, 0, (a[1]+b[1])/2),
                           rotation_y=math.degrees(math.atan2(dx,dz)))
             four=getattr(network,'lane_count',2)==4
-            cube(root, (0, .02, 0), (14 if four else 10, .15, length), '#424b59')
+            if not four:cube(root, (0, .02, 0), (10, .15, length), '#424b59')
             # Mark only lane segments, outside junction connector footprints.
             if four:
+                begin=20 if lane.source in network.junctions and network.junctions[lane.source].kind=='roundabout' else 16 if lane.source in network.junctions else 0
+                end=20 if lane.target in network.junctions and network.junctions[lane.target].kind=='roundabout' else 16 if lane.target in network.junctions else 0
                 for side in (-1,1):
-                    cube(root,(side*.17,.13,0),(.13,.04,max(1,length-40)),'#f5dc91')
+                    cube(root,(side*.17,.195,(begin-end)/2),(.13,.04,max(1,length-begin-end)),'#f5dc91')
                 for t in range(20,int(length)-19,6):
                     for side in (-1,1):
                         # The approach taper replaces the divider before a roundabout.
                         end_merge=lane.target in network.junctions and network.junctions[lane.target].kind=='roundabout'
                         start_split=lane.source in network.junctions and network.junctions[lane.source].kind=='roundabout'
                         if (end_merge and t>length-40) or (start_split and t<36):continue
-                        cube(root,(side*3.5,.13,t-length/2),(.14,.04,2.6),'#eee9da')
+                        cube(root,(side*3.5,.195,t-length/2),(.14,.04,2.6),'#eee9da')
             else:
                 for t in range(18, int(length)-17, 6):
                     cube(root, (0, .13, t-length/2), (.16, .04, 2.6), '#f5dc91')
@@ -105,15 +111,15 @@ class CityView:
         for j in network.junctions.values():
             x, z = j.position
             if j.kind == 'signal':
-                tile = cube(pos=(x, .06, z), scale=(14 if getattr(network,'lane_count',2)==4 else 10, .16,14 if getattr(network,'lane_count',2)==4 else 10), tint='#424b59', collider='box')
+                tile = Entity(position=(x,0,z),collider='box',scale=(14,.1,14)) if four else cube(pos=(x,.06,z),scale=(10,.16,10),tint='#424b59',collider='box')
             else:
-                tile = Entity(model=deepcopy(self.disk), position=(x,.12,z), scale=(28,.15,28), color=color.hex('#424b59'), collider='box')
+                tile = Entity(position=(x,0,z),collider='box',scale=(28,.1,28)) if four else Entity(model=deepcopy(self.disk), position=(x,.12,z), scale=(28,.15,28), color=color.hex('#424b59'), collider='box')
                 Entity(model=deepcopy(self.disk), position=(x,.25,z), scale=(12,.6,12), color=color.hex('#ded4b9'))
                 Entity(model=deepcopy(self.disk), position=(x,.85,z), scale=(10,.2,10), color=color.hex('#77a56b'))
                 self.tree(x,z)
             # Entry/exit pavement follows the very same sampled connectors.
             for path in network.connectors.values():
-                if path.junction == j.id:
+                if not four and path.junction == j.id:
                     vertices, triangles = [], []
                     for i, point in enumerate(path.points):
                         other = path.points[min(i+1,len(path.points)-1)] if i < len(path.points)-1 else path.points[i-1]
@@ -333,6 +339,8 @@ class CityView:
         root.collider=BoxCollider(root,center=(0,1.2,0),size=(v.spec.width/root.scale_x,2.4,v.spec.length/root.scale_z))
         root.on_click=lambda:self.select('vehicle',v.id)
         root.bulbs=[lamps]
+        from .lighting import beam
+        root.beam=beam(root,v)
         # All body geometry is opaque. Only lamp geometry uses the unlit shader.
         from panda3d.core import TransparencyAttrib
         root.model.setTransparency(TransparencyAttrib.M_none)
@@ -362,6 +370,7 @@ class CityView:
             car=self.cars[v.id];night=self.lighting.day<.99
             if night!=getattr(car,'night',None):
                 for bulb in car.bulbs:bulb.enabled=night
+                if hasattr(car,'beam'):car.beam.enabled=night
                 car.night=night
             x, z, yaw = sim.visual_pose(v) if self.optimized else sim.pose(v)
             self.cars[v.id].position = (x, .22, z)

@@ -146,6 +146,9 @@ class Interface:
                        +fill(self.sim.spawn_status,38)+'\n'
                        +('Paused: resume to admit.' if self.sim.paused else
                          'Blocked? Wait for clearance or lower target.' if self.sim.pending else 'All requested vehicles admitted.'))
+        from .night import counts
+        q=counts(self.sim)
+        self.mix.text+=f'\nDrunk road {q["active"]} / wreck {q["wrecks"]}\nDrunk queued {q["pending"]} / target {q["target"]}\n'+fill(q['blocker'],38)
         m=self.sim.metrics.values(self.sim)
         rate=m['accidents_per_1000_vehicle_km']
         rate='N/A' if rate is None else f'{rate:.1f}'
@@ -153,7 +156,7 @@ class Interface:
             f'Active {m["active"]}/{m["target"]} ({m["on_road"]} on road + {m["wrecks"]} wrecks) | Pending {self.sim.pending} | Trips {m["completed"]}\n'
             f'Accidents {m["accidents"]} | Active incidents {m["active_incidents"]} | Involved {m["involved"]} | {rate} / 1000 veh-km\n'
             f'Distance {m["distance_km"]:.2f} veh-km | Wait {m["waiting_vehicle_s"]:.0f} veh-s ({m["waiting_fraction"]:.0%}) | Dwell {m["bus_dwell_vehicle_s"]:.0f} veh-s\n'
-            f'Safety {self.sim.supervisor.interventions} | Signal attempts {self.sim.supervisor.violations} | Wait includes red/wrecks; excludes bus dwell')
+            f'Drunk road {q["active"]} / wreck {q["wrecks"]} / queued {q["pending"]} / target {q["target"]} | '+('Reckless night (illustrative)' if q['target'] else 'Normal baseline / standard mix'))
         self.mode_button.text=f'Mode: {self.sim.mode} / reset'
         if self.sim.overlay=='None':
             self.legend.text='Overlay off | cumulative since reset'
@@ -187,7 +190,7 @@ class Interface:
                                      f'Reaction {v.driver.reaction:.2f}s | Preferred {v.driver.gap:.1f}m\n'
                                      f'Episode: {v.episode}\nProlog: {v.action}\n{reason}\n'
                                      f'Control: {control}\nExecuted: {v.executed}\n'
-                                     f'Passing: {v.passing_state}\nSafety: {safety}{bus}')
+                                     f'Passing: {v.passing_state}\n{v.passing_reason.replace("_"," ")}\nSafety: {safety}{bus}')
                 if v.incident is not None:
                     r=self.sim.incidents.records[v.incident-1]
                     self.inspector.text+=(f'\nIncident #{r["id"]} | {len(r["vehicles"])} vehicles\n'

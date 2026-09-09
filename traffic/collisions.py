@@ -64,7 +64,7 @@ def breaks(sim,v,travel):
         for d in p.distances:
             t=(offset+d)/travel
             if 0<t<1: points.add(t)
-        offset+=p.length
+        offset+=p.length-getattr(p,'resume_s',0.)
         if offset>=travel: break
     return points
 

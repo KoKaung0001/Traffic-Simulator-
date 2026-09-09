@@ -49,7 +49,7 @@ def decide(sim,v):
     v.oncoming_history.append((sim.elapsed,gap,closing))
     while len(v.oncoming_history)>1 and v.oncoming_history[1][0]<=sim.elapsed-v.driver.reaction:v.oncoming_history.popleft()
     _,old_gap,old_closing=v.oncoming_history[0]
-    clear=old_gap*v.driver.gap_bias/max(.1,old_closing*v.driver.closing_bias)>PARAMETERS['wrong_way']['four_lane_oncoming_ttc']
+    clear=old_gap*v.driver.gap_bias/max(.1,old_closing*v.driver.closing_bias)>(PARAMETERS['reckless_night']['wrong_way_ttc'] if v.driver.reckless else PARAMETERS['wrong_way']['four_lane_oncoming_ttc'])
     return_clear,*_=target_gaps(sim,v,road,'inner',s)
     if v.manoeuvre:
         m=v.manoeuvre
@@ -96,7 +96,7 @@ def decide(sim,v):
     state,reason=sim.rules.wrong_way('assess',True,True,False,clear,return_clear)
     v.used_manoeuvres.add(token)
     if state=='move_out':
-        v.manoeuvre=dict(road=road,base=p.id,route=v.route,limit=limit,duration=v.behaviour_rng.uniform(*PARAMETERS['wrong_way']['duration']))
+        v.manoeuvre=dict(road=road,base=p.id,route=v.route,limit=limit,duration=v.behaviour_rng.uniform(*(PARAMETERS['reckless_night']['wrong_way_duration'] if v.driver.reckless else PARAMETERS['wrong_way']['duration'])))
         if install(sim,v):
             v.passing_state=state;v.passing_reason=reason;event(sim,v,'wrong_way','attempt')
             sim.behaviour_audit.decision(sim,v,reason,gap/max(.1,closing)<5);return

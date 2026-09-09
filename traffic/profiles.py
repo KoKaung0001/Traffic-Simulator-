@@ -8,6 +8,7 @@ PARAMETERS = json.loads(Path(__file__).with_name('parameters.json').read_text())
 
 @dataclass(frozen=True)
 class Driver:
+    reckless: bool = False
     kind: str = 'Normal'
     speed_factor: float = 1.0
     reaction: float = 0.0

@@ -19,6 +19,7 @@ uniform float city_optimized;
 uniform float city_extent;
 uniform sampler2D street_irradiance;
 uniform vec4 headlights[8];
+uniform float headlight_strength[8];
 '''
     lighting='''
     if (night_amount > 0.001 || city_optimized < 0.5) {
@@ -32,7 +33,7 @@ uniform vec4 headlights[8];
         float range = length(offset);
         float cone = dot(offset/max(range,0.01),headlights[i].zw);
         illumination += vec3(0.8,0.78,0.6)*smoothstep(0.85,0.97,cone)
-            *pow(max(0.0,1.0-range/18.0),2.0)*elevation_fill;
+            *pow(max(0.0,1.0-range/18.0),2.0)*elevation_fill*headlight_strength[i];
     }
     fragment_color.rgb = mix(max(fragment_color.rgb,vec3(0.0)),
         material.rgb*illumination,night_amount);
@@ -79,13 +80,16 @@ def lightmap(positions,resolution=512,extent=167.):
 class Lighting:
     def __init__(self,positions,bulbs,extent=167.):
         from ursina import AmbientLight,DirectionalLight,Vec3,scene,color
-        from panda3d.core import PTA_LVecBase4f
+        from panda3d.core import PTA_LVecBase4f,PTA_float
         self.bulbs=bulbs;self.positions=positions;self.last=None
         self.ambient=AmbientLight(color=color.white)
         self.sun=DirectionalLight(shadows=True)
         self.sun.look_at(Vec3(1,-2,-1))
         self.texture=lightmap(positions,extent=extent)
         self.headlights=PTA_LVecBase4f.empty_array(8)
+        self.strength=PTA_float.empty_array(8)
+        self.fades={};self.last_frame=None
+        scene.set_shader_input('headlight_strength',self.strength)
         scene.set_shader_input('street_irradiance',self.texture)
         scene.set_shader_input('city_extent',extent)
         scene.set_shader_input('headlights',self.headlights)
@@ -123,11 +127,22 @@ class Lighting:
         now=perf_counter();live={v.id:v for v in sim.vehicles if not v.crashed}
         if not self.optimized or now>=self.next_selection or any(vid not in live for vid in self.selected):
             # Retained lights receive a 12 m preference to prevent selection flicker.
-            self.selected=[v.id for v in sorted(live.values(),key=lambda v:
+            desired=[v.id for v in sorted(live.values(),key=lambda v:
                 math.dist(sim.pose(v)[:2],(focus.x,focus.z))-(12 if v.id in self.selected else 0))[:8]]
+            self.desired=desired
+            self.selected=[vid for vid in self.selected if vid in live and (vid in desired or self.fades.get(vid,0)>.001)]
+            self.selected += [vid for vid in desired if vid not in self.selected][:8-len(self.selected)]
             self.next_selection=now+.1
+        dt=min(.1,now-self.last_frame) if self.last_frame is not None else 0.
+        self.last_frame=now
+        for vid in self.selected:
+            distance=math.dist(sim.pose(live[vid])[:2],(focus.x,focus.z))
+            target=max(0.,min(1.,(145-distance)/70)) if vid in self.desired else 0.
+            old=self.fades.get(vid,0.)
+            self.fades[vid]=old+max(-dt*2,min(dt*2,target-old))
         cars=[live[vid] for vid in self.selected if vid in live]
         for i in range(8):
+            self.strength[i]=self.fades.get(cars[i].id,0.) if i<len(cars) else 0.
             if i<len(cars) and night>.01:
                 x,z,yaw=sim.visual_pose(cars[i]) if self.optimized else sim.pose(cars[i]);a=math.radians(yaw)
                 # Cone origin follows the same interpolated front bumper as
@@ -136,3 +151,18 @@ class Lighting:
                 x+=math.sin(a)*front;z+=math.cos(a)*front
                 self.headlights[i]=LVecBase4f(x,z,math.sin(a),math.cos(a))
             else:self.headlights[i]=LVecBase4f(10000,10000,0,0)
+
+
+def beam(parent,v):
+    """Cheap world-space translucent beam for EVERY vehicle, independent of LOD."""
+    from ursina import Entity,Mesh,color
+    from ursina.shaders import unlit_shader
+    # Root scales differ by asset type; compensate to retain metre dimensions.
+    z=v.spec.length/2-.05;w=v.spec.width*.35
+    points=[(-w,z),(w,z),(3.2,z+12),(-3.2,z+12)]
+    vertices=[(x/parent.scale_x,-.025/parent.scale_y,zz/parent.scale_z) for x,zz in points]
+    colours=[color.rgba(1,.94,.7,.17),color.rgba(1,.94,.7,.17),color.rgba(1,.94,.7,0),color.rgba(1,.94,.7,0)]
+    e=Entity(parent=parent,model=Mesh(vertices=vertices,triangles=[(0,1,2),(0,2,3)],colors=colours),
+             shader=unlit_shader,double_sided=True)
+    e.model.setDepthWrite(False)
+    return e

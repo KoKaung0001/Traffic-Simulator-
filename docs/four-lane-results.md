@@ -1,4 +1,6 @@
-# Four-lane verification results
+# Historical four-lane verification results
+
+Superseded for current night behaviour, bend geometry and lighting by [the correction report](correction-results.md). These figures describe the earlier configuration.
 
 Measured 8-9 September 2026. These results describe the default compact four-lane network with its peripheral belt. Historical two-lane reports are separate.
 

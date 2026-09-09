@@ -1,4 +1,4 @@
-﻿# Crossing City — Python + Prolog Traffic Lab
+ï»¿# Crossing City â€” Python + Prolog Traffic Lab
 
 The default city now has **four actual lanes per ordinary road**: two in each direction, with right-hand traffic. The central nine blocks retain their 64 m spacing and original building scale. The outer belt provides longer passing corridors without stretching the centre.
 
@@ -12,7 +12,7 @@ From this project directory, using the existing parent virtual environment:
 & '..\.venv\Scripts\python.exe' main.py --population 100 --scenario 'Evening/night' --seed 43
 ```
 
-No dependencies were added. SWI-Prolog and `janus_swi` must be available in that interpreter. Defaults: target 40, Normal drivers at noon, accident mode, performance lighting, VSync off, frame limit 144. A frame limit is **not an achieved FPS claim**. Use `--fps 0` for uncapped measurement, `--vsync` for synchronized presentation, or `--lighting quality` for daytime sun shadows. Both lighting presets retain street illumination and eight nearby headlight cones. `--mode supervised` remains a conservative diagnostic mode. `--compact-only` removes the belt while retaining four-lane central roads; the measured capacity results below use the default belt.
+Runtime geometry now uses Shapely 2.1.2; evidence clips use imageio/imageio-ffmpeg. Install requirements.txt when updating the environment. SWI-Prolog and `janus_swi` must be available in that interpreter. Defaults: target 40, Normal drivers at noon, accident mode, performance lighting, VSync off, frame limit 144. A frame limit is **not an achieved FPS claim**. Use `--fps 0` for uncapped measurement, `--vsync` for synchronized presentation, or `--lighting quality` for daytime sun shadows. Both lighting presets retain street illumination and eight nearby headlight cones. `--mode supervised` remains a conservative diagnostic mode. `--compact-only` removes the belt while retaining four-lane central roads; the measured capacity results below use the default belt.
 
 | Control | Effect |
 | --- | --- |
@@ -22,7 +22,7 @@ No dependencies were added. SWI-Prolog and `janus_swi` must be available in that
 | Scenario / mode change | Fresh run retaining the population target |
 | Click vehicle | Traits, actual/perceived gap, Prolog proposal, executed action, incident history |
 | Click junction | Local green override; Use global removes it |
-| Global green | 5–120 s, applied at the next green boundary |
+| Global green | 5â€“120 s, applied at the next green boundary |
 | Road usage / Accidents | Lane passages / unique incident origins since reset |
 | Scale /2, Scale x2 | Adjust fixed display thresholds; counts stay unchanged |
 | Click coloured lane / cell | Exact count, direction or cell, and accumulation period |
@@ -34,9 +34,9 @@ No dependencies were added. SWI-Prolog and `janus_swi` must be available in that
 
 ## Geometry and movement policy
 
-Each lane is 3.5 m wide; ordinary roads are 14 m wide. Inner centres lie 1.75 m from the centre line, outer centres 5.25 m. Double yellow separates opposing directions; dashed white separates lanes in the same direction. Vehicle dimensions remain sedan 4.4 × 1.8 m, truck 7.2 × 2.3 m and bus 9 × 2.3 m. Central junction coordinates remain `(-96, -32, 32, 96)`; plots remain 48 m across, lawns 31 m, building footprints 9 m and roofs 10 m. Roadside poles and stops are set back from the wider road. Terminal access moved to the adjacent depot road, and Apartments access moved off a roundabout taper.
+Each lane is 3.5 m wide; ordinary roads are 14 m wide. Inner centres lie 1.75 m from the centre line, outer centres 5.25 m. Double yellow separates opposing directions; dashed white separates lanes in the same direction. Vehicle dimensions remain sedan 4.4 Ã— 1.8 m, truck 7.2 Ã— 2.3 m and bus 9 Ã— 2.3 m. Central junction coordinates remain `(-96, -32, 32, 96)`; plots remain 48 m across, lawns 31 m, building footprints 9 m and roofs 10 m. Roadside poles and stops are set back from the wider road. Terminal access moved to the adjacent depot road, and Apartments access moved off a roundabout taper.
 
-The default graph has 40 two-way roads, 224 directed lane segments, 328 junction connectors and 32 continuous lane-change links. IDs identify road, direction, lane and segment. Short central streets have no lane-change link. Longer streets have entry, 20 m change zone and exit segments. Routes select the required approach lane upstream.
+The default graph retains 40 two-way roads, 224 directed lane segments and 32 static lane-change links. Two-arm bends now preserve both lanes through shared offset curves. A single triangulated asphalt surface, bus-sweep turning aprons and adjacent curb rings replace overlapping rectangles and connector strips. IDs identify road, direction, lane and segment. Short central streets have no lane-change link. Longer streets have entry, 20 m change zone and exit segments. Routes select the required approach lane upstream.
 
 | Approach lane | Legal movement | Destination |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ The network contains approximately 8,324 directed lane-metres. A simple straight
 
 The latest bottleneck was software demand generation: the request queue was capped to the active deficit. When only four vehicles were missing, four blocked curb requests could leave other entrances unused. Four-lane demand now maintains a bounded backlog of at least 15 tickets while below target, independent of the admission limit. Stable requests retain their traits and age; rotating retries examine all tickets, and at most four safely enter per 0.1 s admission tick. The active population never exceeds the target through admission. Existing reaction/stopping checks, nearby occupancy checks and reservation checks remain mandatory.
 
-The comparison run with the deficit-sized queue ended at 96 active after 360 s, with 49 completed trips and zero incidents. With the backlog correction, ordinary **Normal seed 42 reached 100 at 48.92 s** and finished 240 s with **100 on-road vehicles, 50 completed trips, zero incidents and zero independently detected interpenetrations**. Sampled stale reservations were zero. No additional map enlargement was needed.
+The current Normal seed-42 run finishes 240 simulated seconds with **100 active vehicles, 53 completed trips and zero incidents**. It reaches 100 within the first 50 seconds at the trace sampling resolution. No map expansion was needed. Earlier exact timings belong to the historical four-lane report.
 
 This is a congested 100-vehicle run, not free-flow traffic: the final mean speed was about 0.38 m/s, and some curb tickets waited the full four minutes. The admission correction uses clear entrances; it does not make a blocked curb physically usable or guarantee bounded waits. Mixed-night collisions and cleanup create additional temporary bottlenecks.
 
@@ -65,15 +65,17 @@ This is a congested 100-vehicle run, not free-flow traffic: the final mean speed
 
 ## Drivers, passing and wrong-way travel
 
-All numerical behaviour assumptions in `traffic/parameters.json` are configurable and **illustrative, not calibrated traffic statistics**. Personalities stay fixed; decisions use per-vehicle seeded randomness. Drunk drivers retain a 75% higher-risk / 25% less-aggressive split; newbies retain a 70% cautious / 30% unsteady split. Admission weights vary by scenario and origin.
+All parameters are explicitly illustrative. Evening/night selects the named **Reckless night** arcade preset by default on the four-lane network. Configure `reckless_night` in `traffic/parameters.json`; `enabled: false` disables its trait overrides. Baseline remains entirely Normal. The legacy two-lane test scenarios keep their original assumptions.
 
-Normal drivers prefer the outer lane when useful, use the inner lane to pass a slower moving leader, and return when the next movement and gaps permit. Planned turns, queues and bus service take priority. Lane changes use a smooth quintic lateral path, front and rear stopping/reaction gaps, both-lane occupancy, deterministic competing claims, and a final gap check before departure. A six-second cooldown limits repeated switching. Access protection and roundabout tapers exclude opportunistic changes.
+The night target is 20 active **non-crashed** drunk drivers, capped by the total vehicle target. The header and setup panel separate drivable drunk vehicles, drunk wrecks, queued drunk admissions and the target. Missing profiles receive new stable tickets from pub, belt and connected gate origins. Three priority tickets alternate with one ordinary ticket; all blocked entries remain subject to safe spawning. No existing personality is changed and wrecks remain in total occupancy. At target occupancy, replacement must await a valid trip completion or clearance. The count can therefore remain below 20 during heavy crashes; the blocker and time series make this visible.
 
-Higher-risk drunk drivers can accept smaller biased gaps, accelerate within vehicle limits, follow closely and brake late. Newbies can hesitate or mistime acceleration/braking. Prolog chooses the action; Python supplies observations and executes bounded physical motion. Actual contact detection stays active over every manoeuvre.
+The preset samples a 90% higher-risk subgroup with stable individual speed, reaction, gap, acceleration, braking and perception differences. Illustrative type limits are 1.8 times cruise speed and 1.6 times nominal acceleration. Higher-risk actors use up to 0.8 signal/gap willingness and 0.85 lane-gap acceptance; each encounter is sampled once. Newbies retain their varied historical subgroups.
 
-Wrong-way travel is separate from passing. A higher-risk drunk sedan must reach an eligible inner lane on a long peripheral straight, have at least 52 m of usable room, and pass a once-per-encounter decision and delayed oncoming assessment. Default willingness is 0.18; assessment is 0.4 s. A 16 m continuous crossing reaches the adjacent opposing inner lane; it does not jump over the road. The sustained episode is sampled at 2–4 s with a 2.5 m/s desired speed, followed by a continuous return when space permits. Full vehicle envelopes and collision checks remain enabled. No actor is forced at a fixed time, no per-frame rerolls occur, and oncoming vehicles remain present.
+Normal drivers retain safe front/rear braking gaps, both-lane occupancy, deterministic lane claims, protected tapers/accesses and continuous 20 m changes. Reckless drivers additionally pass from suitable long-road encounters and can cut back after physically clearing their leader. Continuous lateral paths use the same collision and rendering geometry. Prolog selects passing, return, unsafe gap and signal actions; the inspector explains proposal and execution, and the event feed includes unsafe junction entries.
 
-Ordinary night measurements, lifecycle counts, admitted mix and timing are documented in [the four-lane results](docs/four-lane-results.md). Passing completions require physically clearing the leader; merely reaching the inner lane is reported separately. Pre-departure cancellations and aborted passes are distinct from contact. Planned lane changes may incidentally pass another vehicle; the overtaking count deliberately tracks selected passing episodes.
+Wrong-way travel remains a separate persistent manoeuvre. It starts from an eligible inner lane with 52 m of usable room, uses a continuous 16 m crossing, and returns continuously when space permits. Reckless-night willingness is 0.65 per encounter, perceived oncoming TTC is 1.8 seconds, duration 3-6 seconds and speed limit 8 m/s. Conservative legacy values remain outside this preset. Oncoming vehicles and collision checks remain present.
+
+See [the correction report](docs/correction-results.md) for three ordinary 40-vehicle seeds, a 100-vehicle check, first manoeuvre times, actual completed passes, wrong-way episodes, junction incidents, clips and the population limitation. Constructed conflict fixtures are identified separately.
 
 ## Collision audit
 
@@ -89,8 +91,8 @@ Counts accumulate since reset. Directed lane-segment passages are counted once p
 
 | Overlay | Transparent | Yellow | Orange | Red |
 | --- | --- | --- | --- | --- |
-| Lane passages, scale 1 | 0 | 1–24 | 25–49 | 50+ |
-| Unique incident origins per 16 m cell, scale 1 | 0 | 1–2 | 3–4 | 5+ |
+| Lane passages, scale 1 | 0 | 1â€“24 | 25â€“49 | 50+ |
+| Unique incident origins per 16 m cell, scale 1 | 0 | 1â€“2 | 3â€“4 | 5+ |
 
 Scale buttons multiply thresholds, never data. The numeric legend labels the scale and period. Colours are unlit and stable, without per-frame normalization. Overlay meshes follow the widened lane paths; unchanged data reuses pooled geometry. The GUI verification includes explicitly labelled synthetic repeated-passage and separate-incident fixtures to check visible yellow/orange/red progression; ordinary-run evidence is recorded separately.
 
@@ -102,11 +104,24 @@ Fresh-process visibility checks cover duplicate sedans/trucks/buses by day/night
 
 Physics remains fixed at 60 Hz; behavioural observations run at 10 Hz. Rendering interpolates the two most recent physical poses with one fixed step of visual latency. Camera movement uses render-frame elapsed time. Pausing and contacts display the exact physical pose.
 
-Immutable scenery is batched. Eighteen vehicle type/colour assets are prepared before traffic starts; a car uses one shared body/trim mesh and one shared bulb mesh. Street illumination is a baked irradiance texture applied in world space to roads and vehicles. Eight nearby headlights use 10 Hz selection with a 12 m retention preference, and their positions update every rendered frame. UI text updates at up to 10 Hz; heatmaps update when their data or settings change. Signal colours update on change. Performance lighting skips shadow sampling and the shadow pass; quality adds daytime sun shadows. The sun casts no shadows after sunset. Night illumination is approximate and lacks building occlusion.
+Immutable scenery is batched. Eighteen vehicle type/colour assets are prepared before traffic starts; a car owns independent body/trim and bulb nodes backed by shared immutable geometry. Street illumination is a baked irradiance texture applied in world space to roads and vehicles. Every nighttime vehicle has unlit head/tail lenses and a cheap translucent beam, independent of the camera. Eight expensive illumination slots use 10 Hz selection with a 12 m retention preference and half-second fades; their positions follow each interpolated front bumper. Camera distance changes illumination detail, never logical lamp state. UI text updates at up to 10 Hz; heatmaps update when their data or settings change. Signal colours update on change. Performance lighting skips shadow sampling and the shadow pass; quality adds daytime sun shadows. The sun casts no shadows after sunset. Night illumination is approximate and lacks building occlusion.
 
-The real-window benchmark records day/night, actual 40/100 populations and stationary/pan-zoom cases at 1440 × 900, uncapped with VSync off. Hardware: Intel Core i9-13900HX, NVIDIA RTX 4060 Laptop GPU, Windows 11. [Results](docs/four-lane-results.md) include before/after median, p95 and p99 frame times and inclusive component costs. **144 FPS has not been achieved across these workloads.** No traffic reduction, collision disabling or simulation time dilation is used to improve the figures.
+The real-window benchmark records day/night, actual 40/100 populations and stationary/pan-zoom cases at 1440 Ã— 900, uncapped with VSync off. Hardware: Intel Core i9-13900HX, NVIDIA RTX 4060 Laptop GPU, Windows 11. [Historical results](docs/four-lane-results.md) record the earlier before/after comparison; [current results](docs/correction-results.md) remeasure night panning after the lighting correction. **144 FPS has not been achieved across these workloads.** No traffic reduction, collision disabling or simulation time dilation is used to improve the figures.
 
 ## Verification
+
+Latest correction commands:
+
+```powershell
+& '..\.venv\Scripts\python.exe' -m traffic.correction_runs --duration 300 --seeds 42 43 44
+& '..\.venv\Scripts\python.exe' -m traffic.correction_gui --kind lights
+& '..\.venv\Scripts\python.exe' -m traffic.correction_gui --kind overtaking --seed 43
+& '..\.venv\Scripts\python.exe' -m traffic.correction_gui --kind wrong_way --seed 43
+& '..\.venv\Scripts\python.exe' -m traffic.junction_fixture
+& '..\.venv\Scripts\python.exe' -m traffic.render_benchmark --phase after --night-pan --output artifacts/correction
+```
+
+Historical/general tools:
 
 ```powershell
 & '..\.venv\Scripts\python.exe' -m unittest discover -s tests -v

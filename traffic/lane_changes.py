@@ -51,7 +51,7 @@ def following_gap(sim,v,snapshot,preferred=True):
             if w is v:continue
             d=offset+net.paths[pid].length+ws
             if d>0:distance=min(distance,d-(v.spec.length+w.spec.length)/2)
-        offset+=net.paths[pid].length
+        offset+=net.paths[pid].length-getattr(net.paths[pid],'resume_s',0.)
     own=occupants(sim,v)
     for road,lane,s in own:
         r=net.roads[road]
@@ -131,6 +131,10 @@ def decide_all(sim):
     claimed={net.paths[v.change_grant or v.path_id].road for v in sim.vehicles if v.change_grant or net.paths[v.path_id].kind=='lane_change'}
     for v in sorted(sim.vehicles,key=lambda v:(-v.waiting,v.id)):
         p=net.paths[v.path_id]
+        if v.driver.reckless and not v.crashed and not v.manoeuvre and not v.lane_change and not v.change_grant and p.kind=='lane' and p.lane=='outer':
+            if passing_encounter(sim,v):continue
+        if v.driver.reckless and not v.crashed and not v.manoeuvre and not v.lane_change and v.pass_episode and v.pass_episode['phase']=='passed' and p.kind=='lane' and p.lane=='inner':
+            if cutting_return(sim,v):continue
         if v.change_grant and p.kind=='lane' and p.length-v.s<v.spec.length/2+3:
             cp=net.paths[v.change_grant];s=coordinate(sim,v)[2]
             safe,*_=target_gaps(sim,v,p.road,cp.lane,s)
@@ -149,12 +153,12 @@ def decide_all(sim):
         needed=v.index+1<len(v.route) and v.route[v.index+1]==link
         loc=coordinate(sim,v);_,lane,s=loc
         _,_,_,leader,_=target_gaps(sim,v,p.road,lane,s)
-        passing=(v.spec.kind!='Bus' and lane=='outer' and leader is not None and not leader.crashed and .2<leader.speed<v.desired_speed-1.5
+        passing=(v.spec.kind!='Bus' and lane=='outer' and leader is not None and not leader.crashed and (0<=leader.speed<v.desired_speed-1.5 if v.driver.reckless else .2<leader.speed<v.desired_speed-1.5)
                  and 0<coordinate(sim,leader)[2]-s<40 and v.speed>.5)
         next_turn=next((net.paths[pid].turn for pid in v.route[v.index+1:] if pid in net.connectors),None)
         returning=(lane=='inner' and not needed and next_turn!='left' and sim.elapsed>=v.change_after
                    and (v.pass_episode is None or v.pass_episode['phase']=='passed'))
-        kind='planned' if needed else 'overtaking' if passing else 'return'
+        kind='overtaking' if passing and v.driver.reckless else 'planned' if needed else 'overtaking' if passing else 'return'
         if not (needed or passing or returning):continue
         token=(kind,p.road,v.index,leader.id if passing else None)
         if token in v.used_changes:continue
@@ -162,7 +166,7 @@ def decide_all(sim):
         safe,front,rear,_,_=target_gaps(sim,v,p.road,cp.lane,s)
         eligible=not protected(sim,cp) and sim.elapsed>=v.change_after and p.road not in claimed
         risk=(v.driver.kind=='Drunk' and v.driver.subgroup=='higher_risk' and sim.mode=='accident'
-              and opportunity(v,('lane_risk',*token),cfg['higher_risk_gap_acceptance']) and front*v.driver.gap_bias>1 and rear*v.driver.gap_bias>1)
+              and opportunity(v,('lane_risk',*token),(PARAMETERS['reckless_night']['lane_risk'] if v.driver.reckless else cfg['higher_risk_gap_acceptance'])) and front*v.driver.gap_bias>1 and rear*v.driver.gap_bias>1)
         willing=needed or returning or opportunity(v,('lane_pass',*token),cfg['passing_willingness'] if v.driver.kind!='Newbie' else cfg['newbie_passing_willingness'])
         action,reason=sim.rules.lane_change(needed,passing and willing,returning,eligible,safe,risk)
         v.passing_reason=reason
@@ -191,11 +195,46 @@ def transition(sim,v,previous):
         event(sim,v,'lane_change','attempt',purpose=v.lane_change['kind'])
         if v.lane_change['kind']=='overtaking':v.pass_episode=dict(leader=v.lane_change['leader'],phase='passing')
     elif sim.network.paths[previous].kind=='lane_change':
+        previous_path=sim.network.paths[previous]
+        if hasattr(previous_path,'resume_s'):v.s+=previous_path.resume_s
         kind=v.lane_change['kind'] if v.lane_change else 'planned'
         event(sim,v,kind,'lane_reached' if kind=='overtaking' else 'completion')
         event(sim,v,'lane_change','completion',purpose=kind);v.change_after=sim.elapsed+PARAMETERS['lane_changes']['cooldown_seconds']
         if kind=='return':v.pass_episode=None
         v.lane_change=None;v.change_grant=None;v.passing_state='follow'
+
+
+def cutting_return(sim,v):
+    """A passed reckless driver may cut back on the same long exit segment."""
+    from .network import Path
+    from .four_lane import smooth
+    p=sim.network.paths[v.path_id];road,lane,s=coordinate(sim,v)
+    if p.end_s-s<25 or sim.network.roads[road]['merge']:return False
+    next_turn=next((sim.network.paths[pid].turn for pid in v.route[v.index+1:] if pid in sim.network.connectors),None)
+    if next_turn=='left':return False
+    token=('cut_back',v.index)
+    if token in v.used_changes:return False
+    v.used_changes.add(token)
+    safe,front,rear,_,_=target_gaps(sim,v,road,'outer',s)
+    risk=opportunity(v,token,PARAMETERS['reckless_night']['lane_risk']) and min(front,rear)*v.driver.gap_bias>1
+    action,reason=sim.rules.lane_change(False,False,True,True,safe,risk)
+    event(sim,v,'return','opportunity');v.passing_reason=reason
+    if action!='change':event(sim,v,'return','rejected');return False
+    points=[]
+    for i in range(81):
+        t=i/80;a=sim.network.point(road,s+t*20,'inner');b=sim.network.point(road,s+t*20,'outer')
+        points.append(tuple(a[k]+(b[k]-a[k])*smooth(t) for k in (0,1)))
+    pid=f'ot:{v.id}:cut:{v.index}'
+    q=Path(pid,points,'lane_change',p.source,p.target);q.road=road;q.lane='outer';q.from_lane='inner';q.start_s=s;q.end_s=s+20
+    outgoing,local=sim.network.locate(road,'outer',s+20);q.resume_s=local
+    q.incoming=p.id;q.outgoing=outgoing
+    try:tail=sim.network.plan(outgoing,sim.network.access[v.destination].lane,v.behaviour_rng)
+    except ValueError:return False
+    sim.network.paths[pid]=q
+    v.route=v.route[:v.index]+(pid,)+tail;v.s=0
+    v.lane_change=dict(kind='return',risky=risk,link=pid)
+    v.passing_state='change';event(sim,v,'return','attempt');event(sim,v,'lane_change','attempt',purpose='return')
+    return True
 
 
 def merge_limit(sim,v):
@@ -215,3 +254,38 @@ def merge_limit(sim,v):
         sim.merge_owners[road]=other.id if other else None
     if other is v:return math.inf
     return max(0.,r['length']-20-v.spec.length/2-.5-s)
+
+
+def passing_encounter(sim,v):
+    """Persistent pass from a long-road encounter, not only one fixed decision zone."""
+    from .network import Path
+    from .four_lane import smooth
+    p=sim.network.paths[v.path_id];road,_,s=coordinate(sim,v);r=sim.network.roads[road]
+    if r['merge'] or r['split'] or p.end_s-s<28 or v.speed<.5 or sim.elapsed<v.change_after:return False
+    _,_,_,leader,_=target_gaps(sim,v,road,'outer',s)
+    if not leader or leader.crashed or leader.speed>=v.desired_speed-1.5:return False
+    if coordinate(sim,leader)[2]-s>35:return False
+    for a in sim.network.access.values():
+        ap=sim.network.paths[a.lane]
+        if ap.road==road and s-8<ap.start_s+a.s<s+28:return False
+    token=('encounter_pass',v.index,leader.id)
+    if token in v.used_changes:return False
+    v.used_changes.add(token);event(sim,v,'overtaking','opportunity')
+    safe,front,rear,_,_=target_gaps(sim,v,road,'inner',s)
+    risk=opportunity(v,token,PARAMETERS['reckless_night']['lane_risk']) and min(front,rear)*v.driver.gap_bias>1
+    action,reason=sim.rules.lane_change(False,True,False,True,safe,risk);v.passing_reason=reason
+    if action!='change':event(sim,v,'overtaking','rejected',reason=reason);return False
+    points=[]
+    for i in range(81):
+        t=i/80;a=sim.network.point(road,s+t*20,'outer');b=sim.network.point(road,s+t*20,'inner')
+        points.append(tuple(a[k]+(b[k]-a[k])*smooth(t) for k in (0,1)))
+    pid=f'ot:{v.id}:pass:{v.index}';q=Path(pid,points,'lane_change',p.source,p.target)
+    q.road=road;q.lane='inner';q.from_lane='outer';q.start_s=s;q.end_s=s+20
+    outgoing,local=sim.network.locate(road,'inner',s+20);q.resume_s=local;q.incoming=p.id;q.outgoing=outgoing
+    try:tail=sim.network.plan(outgoing,sim.network.access[v.destination].lane,v.behaviour_rng)
+    except ValueError:event(sim,v,'overtaking','abort',reason='no_destination_route');return False
+    sim.network.paths[pid]=q;v.route=v.route[:v.index]+(pid,)+tail;v.s=0
+    v.lane_change=dict(kind='overtaking',risky=risk,link=pid,leader=leader.id)
+    v.pass_episode=dict(leader=leader.id,phase='passing');v.passing_state='change'
+    event(sim,v,'overtaking','attempt');event(sim,v,'lane_change','attempt',purpose='overtaking')
+    return True

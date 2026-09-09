@@ -32,12 +32,14 @@ class FourLaneNetwork(Network):
         for j in self.junctions.values():
             incoming=[self.paths[ids[-1]] for ids in self.segments.values() if self.paths[ids[-1]].target==j.id]
             outgoing=[self.paths[ids[0]] for ids in self.segments.values() if self.paths[ids[0]].source==j.id]
+            j.bend=len({p.source for p in incoming})==2 and len({p.target for p in outgoing})==2
             for a in incoming:
                 for b in outgoing:
                     if a.source==b.target:continue
                     di=unit(self.nodes[a.source],self.nodes[a.target]);do=unit(self.nodes[b.source],self.nodes[b.target])
                     cross=di[0]*do[1]-di[1]*do[0]
                     turn='left' if cross>.5 else 'right' if cross<-.5 else 'straight'
+                    if j.bend:turn='straight'  # A road bend has no route-choice turn lane.
                     if turn=='left' and a.lane!='inner':continue
                     if turn=='right' and a.lane!='outer':continue
                     if j.kind!='roundabout':
@@ -128,7 +130,15 @@ class FourLaneNetwork(Network):
 
     def build_connector(self,j,a,b,turn,di,do):
         start,end=a.points[-1],b.points[0]
-        if j.kind=='roundabout':
+        if j.bend and j.kind!='roundabout':
+            ri=(di[1],-di[0]);ro=(do[1],-do[0]);offset=OFFSETS[a.lane]
+            centre_start=add(start,ri,-offset);centre_end=add(end,ro,-offset)
+            centre=bezier(centre_start,add(centre_start,di,8.8),add(centre_end,do,-8.8),centre_end,120)
+            pts=[]
+            for i,p in enumerate(centre):
+                f=di if i==0 else do if i==len(centre)-1 else unit(centre[i-1],centre[i+1])
+                pts.append(add(p,(f[1],-f[0]),offset))
+        elif j.kind=='roundabout':
             entry=math.atan2(-di[1],-di[0])+.65;exit_angle=math.atan2(do[1],do[0])-.65
             while exit_angle<=entry:exit_angle+=2*math.pi
             ring=lambda angle:add(j.position,(math.cos(angle),math.sin(angle)),RING)

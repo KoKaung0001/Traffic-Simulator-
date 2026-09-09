@@ -24,6 +24,8 @@ class Incidents:
             location=[(pa[0]+pb[0])/2,(pa[1]+pb[1])/2]
             record=dict(id=len(self.records)+1,start=sim.elapsed,location=location,
                         vehicles={},contacts=[],clear_at=sim.elapsed+self.clearance,cleared=None)
+            from .junction_audit import location_type
+            record['location_type'],record['junction']=location_type(sim.network,location)
             self.records.append(record)
             self.active_ids.add(record['id'])
             self.cells[tuple(math.floor(p/16) for p in location)]+=1
@@ -81,7 +83,7 @@ class Metrics:
         p=net.paths[v.path_id];pid=v.path_id
         if p.kind=='lane_change':
             lane=p.from_lane if v.s<p.length/2 else p.lane
-            pid=net.segments[p.road,lane][1]
+            pid,_=net.locate(p.road,lane,p.start_s+(p.end_s-p.start_s)*v.s/p.length)
         elif p.kind=='opposing' and hasattr(p,'road'):
             r=net.roads[p.road];x,z,_=net.paths[v.path_id].pose(v.s)
             side=(x-r['start'][0])*r['right'][0]+(z-r['start'][1])*r['right'][1]

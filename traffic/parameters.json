@@ -326,5 +326,22 @@
     "gate_weight": 1.5,
     "frontage_weight": 1.0,
     "balance_pending_origins": true
+  },
+  "reckless_night": {
+    "name": "Reckless night",
+    "description": "Illustrative arcade-style scenario, not calibrated traffic statistics.",
+    "enabled": true,
+    "drunk_target": 20,
+    "high_risk_fraction": 0.9,
+    "signal_risk": 0.8,
+    "gap_risk": 0.8,
+    "wrong_way_willingness": 0.65,
+    "wrong_way_speed": 8.0,
+    "wrong_way_ttc": 1.8,
+    "wrong_way_duration": [
+      3.0,
+      6.0
+    ],
+    "lane_risk": 0.85
   }
 }

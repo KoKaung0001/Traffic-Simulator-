@@ -18,6 +18,8 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--phase',choices=('before','after'),default='before')
     p.add_argument('--seconds',type=float,default=8);p.add_argument('--shadow-probe',action='store_true')
     p.add_argument('--heat-probe',action='store_true')
+    p.add_argument('--night-pan',action='store_true')
+    p.add_argument('--output',default='artifacts/four-lane')
     a=p.parse_args()
     from ursina import Ursina,Entity,time,application,Vec3,window
     from panda3d.core import ClockObject
@@ -35,6 +37,7 @@ def main():
     cases=[dict(night=night,target=target,pan=pan) for night in (False,True) for target in (40,100) for pan in (False,True)]
     if a.shadow_probe:cases=[dict(night=n,target=100,pan=True,force_shadows=shadow) for n in (False,True) for shadow in (True,False)]
     if a.heat_probe:cases=[dict(night=n,target=100,pan=True,overlay='Road usage') for n in (False,True)]
+    if a.night_pan:cases=[dict(night=True,target=n,pan=True) for n in (40,100)]
     gsg=app.win.getGsg()
     hardware=dict(cpu=platform.processor(),platform=platform.platform(),renderer=gsg.getDriverRenderer(),
                   vendor=gsg.getDriverVendor(),driver=gsg.getDriverVersion(),resolution=[1440,900],vsync=False,frame_limit=0)
@@ -54,7 +57,7 @@ def main():
         def next_case(self):
             self.number+=1
             if self.number==len(cases):
-                output=Path('artifacts/four-lane');output.mkdir(parents=True,exist_ok=True)
+                output=Path(a.output);output.mkdir(parents=True,exist_ok=True)
                 name=('shadows-' if a.shadow_probe else 'heat-' if a.heat_probe else 'frames-')+a.phase+'.json'
                 (output/name).write_text(json.dumps(dict(hardware=hardware,phase=a.phase,seconds_per_case=a.seconds,cases=self.results),indent=2))
                 self.done=True;print(json.dumps(self.results),flush=True);application.quit();return
