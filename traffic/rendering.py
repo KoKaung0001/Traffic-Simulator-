@@ -45,8 +45,12 @@ class CityView:
         Entity.default_shader = make_shader()
         self.network, self.select = network, select
         self.cars, self.lamps = {}, {}
+        self.optimized=True;self.asset_cache={};self.signal_colours={}
+        from panda3d.core import NodePath
+        self.asset_templates=NodePath('vehicle-geometry-templates')
         self.markers={}
         self.heat=[]
+        self.heat_pool={}
         self.heat_key=None
         self.street_bulbs=[]
         self.street_positions=[]
@@ -64,18 +68,44 @@ class CityView:
             dx, dz = b[0]-a[0], b[1]-a[1]
             root = Entity(position=((a[0]+b[0])/2, 0, (a[1]+b[1])/2),
                           rotation_y=math.degrees(math.atan2(dx,dz)))
-            cube(root, (0, .02, 0), (10, .15, length), '#424b59')
+            four=getattr(network,'lane_count',2)==4
+            cube(root, (0, .02, 0), (14 if four else 10, .15, length), '#424b59')
             # Mark only lane segments, outside junction connector footprints.
-            for t in range(18, int(length)-17, 6):
-                cube(root, (0, .13, t-length/2), (.16, .04, 2.6), '#f5dc91')
+            if four:
+                for side in (-1,1):
+                    cube(root,(side*.17,.13,0),(.13,.04,max(1,length-40)),'#f5dc91')
+                for t in range(20,int(length)-19,6):
+                    for side in (-1,1):
+                        # The approach taper replaces the divider before a roundabout.
+                        end_merge=lane.target in network.junctions and network.junctions[lane.target].kind=='roundabout'
+                        start_split=lane.source in network.junctions and network.junctions[lane.source].kind=='roundabout'
+                        if (end_merge and t>length-40) or (start_split and t<36):continue
+                        cube(root,(side*3.5,.13,t-length/2),(.14,.04,2.6),'#eee9da')
+            else:
+                for t in range(18, int(length)-17, 6):
+                    cube(root, (0, .13, t-length/2), (.16, .04, 2.6), '#f5dc91')
             for i,t in enumerate(range(22,int(length)-17,24)):
                 fraction=t/length;side=1 if i%2 else -1
-                self.streetlamp(a[0]+dx*fraction+side*dz/length*7.3,
-                                a[1]+dz*fraction-side*dx/length*7.3)
+                setback=8.6 if four else 7.3
+                self.streetlamp(a[0]+dx*fraction+side*dz/length*setback,
+                                a[1]+dz*fraction-side*dx/length*setback)
+        if getattr(network,'lane_count',2)==4:
+            # Solid taper boundaries, matching the actual merged centre paths.
+            for road,r in network.roads.items():
+                if not r['merge']:continue
+                f=r['forward'];right=r['right']
+                from .four_lane import smooth
+                for side in (-1,1):
+                    for i in range(20):
+                        s=r['length']-20+i+.5
+                        offset=3.5+side*(3.5-1.75*smooth(i/16))
+                        x=r['start'][0]+f[0]*s+right[0]*offset
+                        z=r['start'][1]+f[1]*s+right[1]*offset
+                        cube(pos=(x,.2,z),scale=(.14,.03,1.05),rotation_y=math.degrees(math.atan2(f[0],f[1])),tint='#eee9da')
         for j in network.junctions.values():
             x, z = j.position
             if j.kind == 'signal':
-                tile = cube(pos=(x, .06, z), scale=(10, .16, 10), tint='#424b59', collider='box')
+                tile = cube(pos=(x, .06, z), scale=(14 if getattr(network,'lane_count',2)==4 else 10, .16,14 if getattr(network,'lane_count',2)==4 else 10), tint='#424b59', collider='box')
             else:
                 tile = Entity(model=deepcopy(self.disk), position=(x,.12,z), scale=(28,.15,28), color=color.hex('#424b59'), collider='box')
                 Entity(model=deepcopy(self.disk), position=(x,.25,z), scale=(12,.6,12), color=color.hex('#ded4b9'))
@@ -103,15 +133,17 @@ class CityView:
                 yaw = math.degrees(math.atan2(-d[0],-d[1]))
                 root = Entity(position=(x,0,z), rotation_y=yaw)
                 if j.kind == 'signal':
-                    cube(root,(2.5,.22,-RADIUS),(4.6,.04,.35),'#f5edcf')
-                    cube(root,(6,2.5,-RADIUS),(.25,5,.25),'#3b4951')
-                    cube(root,(6,5.1,-RADIUS),(1,2.4,.65),'#293942')
+                    four=getattr(network,'lane_count',2)==4
+                    pole=8.6 if four else 6
+                    cube(root,(3.5 if four else 2.5,.22,-RADIUS),(6.8 if four else 4.6,.04,.35),'#f5edcf')
+                    cube(root,(pole,2.5,-RADIUS),(.25,5,.25),'#3b4951')
+                    cube(root,(pole,5.1,-RADIUS),(1,2.4,.65),'#293942')
                     lamps={}
                     for light, y in (('red',5.8),('amber',5.1),('green',4.4)):
-                        lamps[light]=Entity(parent=root, model='sphere',position=(6,y,-RADIUS-.38),scale=(.5,.5,.12),shader=unlit_shader)
+                        lamps[light]=Entity(parent=root, model='sphere',position=(pole,y,-RADIUS-.38),scale=(.5,.5,.12),shader=unlit_shader)
                     self.lamps[(j.id,arm)] = lamps
                 else:
-                    for offset in (1,2.5,4):
+                    for offset in ((2.3,3.5,4.7) if getattr(network,'lane_count',2)==4 else (1,2.5,4)):
                         Entity(parent=root,model=Mesh(vertices=[(offset-.5,.23,-20.7),(offset+.5,.23,-20.7),(offset,.23,-19.7)],triangles=[(0,1,2)]),color=color.hex('#f5edcf'),double_sided=True)
         names = [('SCHOOL','#eac66d',5),('UNIVERSITY','#eac66d',8),('HOSPITAL','#d9ece6',7),
                  ('APARTMENTS','#d8a4a0',10),('DOWNTOWN','#a7cbd0',16),('BANK / OFFICES','#b8b2ce',9),
@@ -166,7 +198,7 @@ class CityView:
             cube(root,(3.8,1.6,0),(.16,3.2,.16),'#42666c')
             cube(root,(3.8,3,0),(5,1,.25),'#42666c')
             Text(parent=root,text=access.name,position=(3.8,3, -.16),origin=(0,0),scale=28,color=color.hex('#ffedbc'),double_sided=True)
-        for lane,(name,s) in BUS_STOPS.items():
+        for lane,(name,s) in getattr(network,'bus_stops',BUS_STOPS).items():
             x,z,yaw=network.paths[lane].pose(s)
             root=Entity(position=(x,0,z),rotation_y=yaw)
             cube(root,(3.7,.35,1),(1.6,.35,9),'#67b4c4')
@@ -184,6 +216,14 @@ class CityView:
         static.model.generate()
         static.double_sided = True
         self.lighting=Lighting(self.street_positions,self.street_bulbs,network.extent)
+        # Build all eighteen reusable type/colour assets before the run begins.
+        from types import SimpleNamespace
+        from .profiles import vehicle_spec
+        from ursina import destroy
+        for kind in ('Sedan','Truck','Bus'):
+            for tint in range(len(PALETTE)):
+                asset=self.vehicle_asset(SimpleNamespace(id=-1,spec=vehicle_spec(kind),tint=tint))
+                asset.enabled=False;destroy(asset)
         camera.orthographic = True
         self.highlight = Entity(model='wireframe_cube',color=color.hex('#ffdb77'),shader=unlit_shader,enabled=False)
         self.home()
@@ -230,6 +270,7 @@ class CityView:
         root.model.normals = [Vec3(*n).normalized() for n in root.model.normals]
         root.model.generate()
         root.scale=(v.spec.width/1.8,1,v.spec.length/4.4)
+        root.body=body
         return root
 
     def long_vehicle(self,v):
@@ -260,30 +301,73 @@ class CityView:
         root.combine(ignore=[body],include_normals=True)
         root.model.normals=[Vec3(*n).normalized() for n in root.model.normals]
         root.model.generate()
+        root.body=body
+        return root
+
+    def vehicle_asset(self,v):
+        from ursina import BoxCollider
+        from ursina.shaders import unlit_shader
+        key=(v.spec.kind,v.spec.length,v.spec.width,v.tint)
+        if key not in self.asset_cache:
+            root=self.sedan(v)
+            root.combine(include_normals=True)
+            # Decorative lamps/windows remain inside the physical rectangle.
+            w=v.spec.width/root.scale_x/2;l=v.spec.length/root.scale_z/2
+            root.model.vertices=[(max(-w,min(w,x)),y,max(-l,min(l,z))) for x,y,z in root.model.vertices]
+            root.model.generate()
+            lamps=Entity(parent=root,shader=unlit_shader)
+            for side in (-1,1):
+                for direction,tint in ((1,'#fff0bd'),(-1,'#ee4545')):
+                    cube(lamps,(side*w*.64,.95,direction*(l-.05)),(.38,.22,.1),tint)
+            lamps.combine()
+            # Entity(model=NodePath) reparents that exact node. Cache detached
+            # templates, then copy scene nodes for each owner; Panda shares the
+            # immutable Geom buffers without sharing visibility/material state.
+            self.asset_cache[key]=(root.model.copyTo(self.asset_templates),tuple(root.scale),lamps.model.copyTo(self.asset_templates))
+        else:
+            mesh,scale,bulbs=self.asset_cache[key]
+            root=Entity(scale=scale)
+            root.model=mesh.copyTo(root)
+            lamps=Entity(parent=root,shader=unlit_shader)
+            lamps.model=bulbs.copyTo(lamps)
+        root.collider=BoxCollider(root,center=(0,1.2,0),size=(v.spec.width/root.scale_x,2.4,v.spec.length/root.scale_z))
+        root.on_click=lambda:self.select('vehicle',v.id)
+        root.bulbs=[lamps]
+        # All body geometry is opaque. Only lamp geometry uses the unlit shader.
+        from panda3d.core import TransparencyAttrib
+        root.model.setTransparency(TransparencyAttrib.M_none)
         return root
 
     def sync(self, sim):
+        with sim.timings.measure('scene_sync'):self._sync(sim)
+
+    def _sync(self, sim):
         from ursina import destroy
         from ursina.shaders import unlit_shader
-        self.lighting.sync(sim,self.focus)
+        with sim.timings.measure('lighting'):self.lighting.sync(sim,self.focus)
         ids = {v.id for v in sim.vehicles}
         for vid in list(self.cars):
             if vid not in ids:
                 destroy(self.cars.pop(vid))
         for v in sim.vehicles:
             if v.id not in self.cars:
-                self.cars[v.id] = self.sedan(v)
-                car=self.cars[v.id];car.bulbs=[]
-                for side in (-1,1):
-                    for direction,tint in ((1,'#fff0bd'),(-1,'#ee4545')):
-                        # Sedan root is scaled to spec; all nominal sedans use its dimensions.
-                        car.bulbs.append(cube(car,(side*v.spec.width*.32,.95,direction*(v.spec.length/2+.08)),
-                            (.38,.22,.1),tint,shader=unlit_shader))
-            for bulb in self.cars[v.id].bulbs:bulb.enabled=self.lighting.day<.99
-            x, z, yaw = sim.pose(v)
+                self.cars[v.id] = self.vehicle_asset(v) if self.optimized else self.sedan(v)
+                car=self.cars[v.id]
+                if not self.optimized:
+                    car.bulbs=[]
+                    for side in (-1,1):
+                        for direction,tint in ((1,'#fff0bd'),(-1,'#ee4545')):
+                            car.bulbs.append(cube(car,(side*v.spec.width*.32,.95,direction*(v.spec.length/2-.05)),
+                                (.38,.22,.1),tint,shader=unlit_shader))
+            car=self.cars[v.id];night=self.lighting.day<.99
+            if night!=getattr(car,'night',None):
+                for bulb in car.bulbs:bulb.enabled=night
+                car.night=night
+            x, z, yaw = sim.visual_pose(v) if self.optimized else sim.pose(v)
             self.cars[v.id].position = (x, .22, z)
             self.cars[v.id].rotation_y = yaw
-            self.cars[v.id].color=color.hex('#b97e73' if v.crashed else '#ffffff')
+            if v.crashed!=getattr(car,'crashed',None):
+                car.color=color.hex('#b97e73' if v.crashed else '#ffffff');car.crashed=v.crashed
         active={r['id']:r for r in sim.incidents.records if r['cleared'] is None}
         for iid in list(self.markers):
             if iid not in active: destroy(self.markers.pop(iid))
@@ -295,35 +379,50 @@ class CityView:
                 from ursina import Text
                 Text(parent=marker,text=f'! {iid}',origin=(0,0),y=1.3,scale=2,billboard=True,color=color.white)
                 self.markers[iid]=marker
-        self.sync_heat(sim)
+        with sim.timings.measure('heatmaps'):self.sync_heat(sim)
         colours = {'red': '#ff6057', 'amber': '#ffc95c', 'green': '#76ef9e'}
         for (jid, arm), lights in self.lamps.items():
             active = sim.signals[jid].light(arm)
+            if self.optimized and self.signal_colours.get((jid,arm))==active:continue
+            self.signal_colours[jid,arm]=active
             for name, lamp in lights.items():
                 lamp.color = color.hex(colours[name] if name == active else '#263b3c')
 
     def sync_heat(self,sim):
-        from ursina import destroy
+        from ursina import Mesh
         from ursina.shaders import unlit_shader
-        key=(sim.overlay,tuple(sorted(sim.metrics.usage.items())),tuple(sorted(sim.incidents.cells.items())))
+        from .heatmaps import level,PALETTE
+        key=(sim.overlay,sim.metrics.revision,len(sim.incidents.records),sim.heat_scale,id(sim.metrics))
         if key==self.heat_key:return
         self.heat_key=key
-        for entity in self.heat:destroy(entity)
+        for entity in self.heat_pool.values():entity.enabled=False
         self.heat=[]
-        palette=('#42666c','#b9b551','#e67946','#ce4144')
         if sim.overlay=='Road usage':
             for pid,p in sim.network.lanes.items():
                 count=sim.metrics.usage[pid]
-                level=0 if count==0 else (1 if count<25 else 2 if count<50 else 3)
-                a,b=p.points[0],p.points[-1]
-                self.heat.append(cube(pos=((a[0]+b[0])/2,.205,(a[1]+b[1])/2),
-                    scale=(.85,.025,p.length),rotation_y=p.pose(0)[2],tint=palette[level],shader=unlit_shader))
+                band=level(count,sim.overlay,sim.heat_scale)
+                if not band:continue
+                key=('lane',pid)
+                if key not in self.heat_pool:
+                    vertices=[];triangles=[]
+                    for i,(x,z) in enumerate(p.points):
+                        yaw=math.radians(p.pose(p.distances[i])[2]);dx,dz=math.cos(yaw)*1.4,-math.sin(yaw)*1.4
+                        vertices.extend(((x+dx,.205,z+dz),(x-dx,.205,z-dz)))
+                        if i:k=2*i;triangles.extend(((k-2,k,k-1),(k-1,k,k+1)))
+                    self.heat_pool[key]=Entity(model=Mesh(vertices=vertices,triangles=triangles),double_sided=True,
+                        shader=unlit_shader,collider='mesh',on_click=lambda pid=pid:self.select('lane',pid))
+                e=self.heat_pool[key];e.enabled=True;e.color=color.hex(PALETTE[band]);self.heat.append(e)
         elif sim.overlay=='Accidents':
             # Empty cells are transparent: a blank map means zero incidents.
             for (x,z),count in sim.incidents.cells.items():
-                level=1 if count<3 else 2 if count<5 else 3
-                e=cube(pos=(x*16+8,.19,z*16+8),scale=(16,.018,16),tint=palette[level],shader=unlit_shader)
-                e.color=color.rgba(e.color.r,e.color.g,e.color.b,.42)
+                band=level(count,sim.overlay,sim.heat_scale)
+                if not band:continue
+                key=('cell',x,z)
+                if key not in self.heat_pool:
+                    self.heat_pool[key]=cube(pos=(x*16+8,.21,z*16+8),scale=(16,.018,16),shader=unlit_shader,
+                        collider='box',on_click=lambda cell=(x,z):self.select('cell',cell))
+                e=self.heat_pool[key];e.enabled=True;e.color=color.hex(PALETTE[band])
+                e.color=color.rgba(e.color.r,e.color.g,e.color.b,.55)
                 self.heat.append(e)
 
     def clear_cars(self):
@@ -343,7 +442,7 @@ class CityView:
         if kind == 'vehicle':
             v = next((v for v in sim.vehicles if v.id == key), None)
             if v:
-                x,z,yaw = sim.pose(v)
+                x,z,yaw = sim.visual_pose(v) if self.optimized else sim.pose(v)
                 self.highlight.position = (x,1,z)
                 self.highlight.scale = (v.spec.width+.8,3.4,v.spec.length+.8)
                 self.highlight.rotation_y = yaw

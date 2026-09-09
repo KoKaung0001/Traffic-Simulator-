@@ -166,6 +166,9 @@ def decide(sim,v):
 
 
 def valid(sim,v):
+    if getattr(sim.network,'lane_count',2)==4:
+        from .four_wrong_way import valid as four_valid
+        return four_valid(sim,v)
     p=sim.network.paths[v.path_id]
     if not math.isfinite(v.s+v.speed) or not 0<=v.s<=p.length+1e-6:return False
     if not v.manoeuvre:return not v.path_id.startswith('ot:')

@@ -120,6 +120,7 @@ def frontage_weights(clock,arrivals=False):
 
 
 def route_between(net, origin, destination, rng):
+    if hasattr(net,'trip_route'):return net.trip_route(origin,destination,rng)
     access=getattr(net,'access',ACCESS)
     a,b=access[origin].lane,access[destination].lane
     if a == b:

@@ -20,9 +20,14 @@ def main():
     parser.add_argument('--compact-only',action='store_true',help='Use the original compact roads with improved gate admission, without the outer belt.')
     parser.add_argument('--population',type=int,default=40)
     parser.add_argument('--seed',type=int,default=42)
+    parser.add_argument('--fps',type=int,default=144,help='Frame cap; 0 is uncapped. This is a limit, not a performance claim.')
+    parser.add_argument('--vsync',action='store_true',help='Synchronize presentation to the display refresh rate.')
+    parser.add_argument('--lighting',choices=('performance','quality'),default='performance',help='Quality adds daytime sun shadows; both use street irradiance and eight headlights.')
     parser.add_argument('--scenario',choices=('Baseline','Morning commute','Evening/night'),default='Baseline')
     args = parser.parse_args()
     if not 0<=args.population<=100:parser.error('Population must be 0..100')
+    if args.fps<0:parser.error('FPS must be nonnegative')
+    if args.block_spacing not in (None,64.):parser.error('The compact block spacing is fixed at 64 m.')
     try:
         rules = PrologRules()
     except RuntimeError as exc:
@@ -31,12 +36,18 @@ def main():
     from ursina import Ursina, Entity, held_keys, time, window, application
     from traffic.rendering import CityView
     from traffic.ui import Interface
-    app = Ursina(title='Crossing City | AI Traffic Lab', borderless=False, size=(1440, 900), vsync=True, development_mode=False)
+    app = Ursina(title='Crossing City | AI Traffic Lab', borderless=False, size=(1440, 900), vsync=args.vsync, development_mode=False)
+    from panda3d.core import ClockObject
+    clock=ClockObject.getGlobalClock()
+    clock.setMode(ClockObject.M_limited if args.fps else ClockObject.M_normal)
+    if args.fps:clock.setFrameRate(args.fps)
     window.color = __import__('ursina').color.hex('#c6ddd8')
     window.exit_button.visible = False
     window.fps_counter.enabled = False
     from traffic.network import Network
-    net=Network(spacing=args.block_spacing or 64.,gates=True) if args.block_spacing is not None or args.compact_only else None
+    from traffic.four_lane import FourLaneNetwork
+    net=FourLaneNetwork(peripheral=False) if args.compact_only or args.block_spacing is not None else None
+    if args.smoke_recovery or args.smoke_behaviour or args.smoke_m4 or args.smoke_test:net=Network()
     sim = Simulation(rules,mode=args.mode,clearance=args.clearance,network=net,seed=args.seed,scenario=args.scenario)
     if args.population!=40:sim.reset(target=args.population)
 
@@ -57,9 +68,12 @@ def main():
         view.home()
         view.sync(sim)
 
-    ui = Interface(sim, reset, lambda: view.home(),scenario)
+    def home():
+        ui.follow_id=None;view.home()
+    ui = Interface(sim, reset, home,scenario)
     ui.population.value=sim.target
     view = CityView(sim.network, ui.select)
+    view.lighting.quality=args.lighting=='quality'
     view.sync(sim)
 
     def screenshot(name):
@@ -98,8 +112,12 @@ def main():
         from traffic.gui_checks import RecoveryGuiChecks
         recovery_checks=RecoveryGuiChecks(sim,view,ui,scenario,screenshot,app)
     if args.smoke_capacity or args.smoke_layout:
-        from traffic.capacity_gui_checks import CapacityGuiChecks
-        capacity_checks=CapacityGuiChecks(sim,view,ui,scenario,screenshot,layout_only=args.smoke_layout)
+        if args.smoke_capacity:
+            from traffic.four_gui_checks import FourLaneGuiChecks
+            capacity_checks=FourLaneGuiChecks(sim,view,ui,scenario,screenshot)
+        else:
+            from traffic.capacity_gui_checks import CapacityGuiChecks
+            capacity_checks=CapacityGuiChecks(sim,view,ui,scenario,screenshot,layout_only=True)
 
     class Controller(Entity):
         frames = 0
@@ -110,9 +128,14 @@ def main():
                 dx = held_keys['d'] + held_keys['right arrow'] - held_keys['a'] - held_keys['left arrow']
                 dz = held_keys['w'] + held_keys['up arrow'] - held_keys['s'] - held_keys['down arrow']
                 if dx or dz:
+                    ui.follow_id=None
                     view.pan(dx * time.dt * 50, dz * time.dt * 50)
+            if ui.follow_id is not None:
+                actor=next((v for v in sim.vehicles if v.id==ui.follow_id),None)
+                if actor:
+                    x,z,_=sim.visual_pose(actor);view.focus=__import__('ursina').Vec3(x,0,z);view.set_camera()
             view.sync(sim)
-            ui.sync()
+            with sim.timings.measure('ui'):ui.sync()
             view.show_selection(sim, ui.selected)
             if view.last_aspect != window.aspect_ratio:
                 view.fit()
@@ -275,8 +298,10 @@ def main():
             elif key == 'r':
                 reset()
             elif key == 'h':
-                view.home()
+                home()
+            elif key=='escape':ui.follow_id=None
             elif not ui.blocks_pointer() and key in ('scroll up', 'scroll down'):
+                ui.follow_id=None
                 view.zoom(-12 if key == 'scroll up' else 12)
 
     Controller()

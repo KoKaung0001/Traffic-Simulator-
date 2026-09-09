@@ -297,6 +297,9 @@
   },
   "wrong_way": {
     "enabled": true,
+    "four_lane_shift_length": 16.0,
+    "four_lane_minimum_room": 52.0,
+    "four_lane_oncoming_ttc": 5.0,
     "duration": [
       2.0,
       4.0
@@ -304,6 +307,15 @@
     "speed": 2.5,
     "assessment_seconds": 0.4,
     "minimum_straight": 28.0
+  },
+  "lane_changes": {
+    "description": "Illustrative probabilities per encountered leader; not calibrated traffic statistics.",
+    "passing_willingness": 0.8,
+    "newbie_passing_willingness": 0.25,
+    "higher_risk_gap_acceptance": 0.45,
+    "cooldown_seconds": 6.0,
+    "retry_seconds": 2.0,
+    "access_buffer": 14.0
   },
   "network": {
     "block_spacing": 64.0,

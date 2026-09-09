@@ -32,11 +32,15 @@ class Incidents:
         record['contacts'].append(dict(time=sim.elapsed,pair=[a.id,b.id],linked_incidents=existing))
         for v in (a,b):
             self.involved.add(v.id)
+            if not v.crashed and getattr(sim.network,'lane_count',2)==4 and (v.lane_change or v.manoeuvre or (v.pass_episode and v.pass_episode['phase']=='passing')):
+                from .lane_changes import event
+                event(sim,v,'wrong_way' if v.manoeuvre else v.lane_change['kind'] if v.lane_change else 'overtaking','collision')
             if v.manoeuvre and hasattr(sim,'flow_audit'):
                 sim.flow_audit.mark(v,v.manoeuvre_mode,'collisions')
             if v.incident is None:
                 v.incident=record['id']
                 record['vehicles'][v.id]=dict(type=v.spec.kind,profile=v.driver.kind,
+                    pre_history=deepcopy(list(v.trace)),
                     actions=deepcopy(list(v.recent)),proposal=v.action,reason=v.reason,executed='crashed',
                     explanation='Contact followed an unsafe-gap proposal.' if v.reason=='unsafe_gap_accepted' else
                         'Contact followed a signal-violation proposal.' if v.reason=='signal_violation' else
@@ -71,12 +75,24 @@ class Metrics:
         self.exposure=0.
         self.usage=Counter()
         self.seen=set()
+        self.revision=0
 
     def enter(self,v,net):
-        key=(v.id,v.index)
-        if net.paths[v.path_id].kind=='lane' and key not in self.seen:
+        p=net.paths[v.path_id];pid=v.path_id
+        if p.kind=='lane_change':
+            lane=p.from_lane if v.s<p.length/2 else p.lane
+            pid=net.segments[p.road,lane][1]
+        elif p.kind=='opposing' and hasattr(p,'road'):
+            r=net.roads[p.road];x,z,_=net.paths[v.path_id].pose(v.s)
+            side=(x-r['start'][0])*r['right'][0]+(z-r['start'][1])*r['right'][1]
+            road=p.road if side>=0 else '>'.join(reversed(p.road.split('>')))
+            r=net.roads[road];s=(x-r['start'][0])*r['forward'][0]+(z-r['start'][1])*r['forward'][1]
+            pid,_=net.locate(road,'inner',s)
+        key=(v.id,v.index,pid)
+        if net.paths[pid].kind=='lane' and key not in self.seen:
             self.seen.add(key)
-            self.usage[v.path_id]+=1
+            self.usage[pid]+=1
+            self.revision+=1
 
     def values(self,sim):
         return dict(accidents=len(sim.incidents.records),active_incidents=sim.incidents.active,

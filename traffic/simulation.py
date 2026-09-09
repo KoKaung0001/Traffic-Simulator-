@@ -79,6 +79,12 @@ class Vehicle:
     threat_history: deque = field(default_factory=deque)
     oncoming_brake: bool = False
     used_manoeuvres: set = field(default_factory=set)
+    change_grant: str | None = None
+    lane_change: object = None
+    change_after: float = 0.
+    used_changes: set = field(default_factory=set)
+    trace: deque = field(default_factory=lambda:deque(maxlen=40))
+    pass_episode: object = None
 
     @property
     def desired_speed(self):
@@ -96,9 +102,10 @@ class Vehicle:
 class Simulation:
     def __init__(self, rules, seed=42, network=None, scenario='Baseline', mode='supervised', clearance=45.):
         self.rules, self.seed = rules, seed
-        self.network = copy(network) if network else Network(spacing=PARAMETERS.get('network',{}).get('block_spacing',64.),
-                                          gates=PARAMETERS.get('demand',{}).get('enable_gates',True),
-                                          peripheral=PARAMETERS.get('network',{}).get('peripheral',False))
+        if network:self.network=copy(network)
+        else:
+            from .four_lane import FourLaneNetwork
+            self.network=FourLaneNetwork(peripheral=PARAMETERS.get('network',{}).get('peripheral',True))
         self.network.paths=dict(self.network.paths)
         self.scenario=scenario
         if mode not in ('supervised','accident'): raise ValueError(mode)
@@ -120,7 +127,13 @@ class Simulation:
         self.behaviour_audit=behaviour.BehaviourAudit()
         from .flow_audit import FlowAudit
         self.flow_audit=FlowAudit()
+        from collections import Counter
+        self.lane_counts=Counter();self.lane_events=[];self.event_feed=deque(maxlen=5)
+        self.merge_owners={}
+        from .timing import Timings
+        self.timings=Timings();self.previous_poses={}
         self.overlay='None'
+        self.heat_scale=1.
         self.queued=deque()
         self.removals=[]
         self.removed_ids=set()
@@ -162,7 +175,8 @@ class Simulation:
                         v.index=index
                         v.s=self.rng.uniform(v.spec.length/2+1,self.network.paths[v.path_id].length-v.spec.length/2-2)
                         v.serviced=set()
-                        if v.path_id in BUS_STOPS and v.s>BUS_STOPS[v.path_id][1]:
+                        stops=getattr(self.network,'bus_stops',BUS_STOPS)
+                        if v.path_id in stops and v.s>stops[v.path_id][1]:
                             v.serviced.add(index)
                         if self.supervisor.spawn_clear(self.network,v,self.vehicles):
                             self.vehicles.append(v)
@@ -189,7 +203,7 @@ class Simulation:
     def _make_vehicle(self, ticket):
         spec=vehicle_spec(ticket.vehicle)
         try:
-            route=BUS_ROUTE if ticket.vehicle == 'Bus' else route_between(self.network,ticket.origin,ticket.destination,self.rng)
+            route=getattr(self.network,'bus_route',BUS_ROUTE) if ticket.vehicle == 'Bus' else route_between(self.network,ticket.origin,ticket.destination,self.rng)
         except ValueError:
             return None
         if not self.network.supports(route,spec):
@@ -203,9 +217,14 @@ class Simulation:
 
     def _admit_demand(self):
         # Unentered demand is a stable queue; blocked tickets retain their traits.
-        while len(self.queued)>self.pending:
+        four=getattr(self.network,'lane_count',2)==4
+        # The active deficit is an admission limit, not a demand-generation cap.
+        # Keep a bounded multi-entry backlog so a few blocked curb tickets do
+        # not starve clear gateways. Existing tickets keep their identity/age.
+        backlog=max(self.pending,len([name for name in self.network.access if not name.endswith('exit')])) if four and self.target else self.pending
+        while not four and len(self.queued)>self.pending:
             self.queued.pop()
-        for _ in range(max(0,self.pending-len(self.queued))):
+        for _ in range(max(0,backlog-len(self.queued))):
             for attempt in range(30):
                 ticket=request(self.rng,self.scenario,self.clock,gates=self.network.gates,queued=self.queued,peripheral=self.network.peripheral)
                 if ticket.vehicle == 'Bus' and sum(v.spec.kind == 'Bus' for v in list(self.vehicles)+list(self.queued)) >= PARAMETERS['max_buses']:
@@ -279,6 +298,16 @@ class Simulation:
         if v.contact_pose is not None:return v.contact_pose
         return self.network.paths[v.path_id].pose(v.s)
 
+    def visual_pose(self,v):
+        """One fixed step of visual latency; never changes physical observations."""
+        current=self.pose(v)
+        if self.paused or v.crashed:return current
+        previous=self.previous_poses.get(v.id,current)
+        alpha=max(0.,min(1.,self.accumulator/STEP))
+        angle=(current[2]-previous[2]+180)%360-180
+        return (previous[0]+alpha*(current[0]-previous[0]),
+                previous[1]+alpha*(current[1]-previous[1]),previous[2]+alpha*angle)
+
     def _spawn(self, lane_id, s=0.):
         if any(v.path_id == lane_id and abs(v.s-s) < LENGTH+GAP+2 for v in self.vehicles):
             return False
@@ -323,6 +352,9 @@ class Simulation:
             self.accumulator -= STEP
 
     def _gap(self, v, snapshot, preferred=True):
+        if getattr(self.network,'lane_count',2)==4:
+            from .lane_changes import following_gap
+            return following_gap(self,v,snapshot,preferred)
         path = self.network.paths[v.path_id]
         distance = math.inf
         # Look along this vehicle's next route segments, including connector tails.
@@ -356,7 +388,7 @@ class Simulation:
         candidates = []
         for v, pid, s in snapshot:
             path = net.paths[pid]
-            connector = net.paths[v.route[v.index+1]] if path.kind == 'lane' and v.index+1 < len(v.route) and not v.manoeuvre else None
+            connector = net.paths[v.route[v.index+1]] if path.kind == 'lane' and v.index+1 < len(v.route) and v.route[v.index+1] in net.connectors and not v.manoeuvre else None
             candidates.append((v, path, connector))
         # After 60 seconds, oldest stopped queues get first chance at a safe gap.
         # Moving/committed opposing traffic retains priority; no reservation is revoked.
@@ -463,15 +495,21 @@ class Simulation:
         return self.network.paths[v.route[index]].pose(s)
 
     def bus_stop(self,v):
-        if v.spec.kind != 'Bus' or v.index in v.serviced or v.path_id not in BUS_STOPS:
+        stops=getattr(self.network,'bus_stops',BUS_STOPS)
+        if v.spec.kind != 'Bus' or v.index in v.serviced or v.path_id not in stops:
             return None
         if v.index == 0:
             return None
-        return BUS_STOPS[v.path_id]
+        return stops[v.path_id]
 
     def step(self):
+        self.rules.timings=self.timings
+        with self.timings.measure('simulation'):self._step()
+
+    def _step(self):
         if self.paused:
             return
+        self.previous_poses={v.id:self.pose(v) for v in self.vehicles}
         self.incidents.clear(self)
         self.supervisor.context=self
         changed = False
@@ -489,16 +527,29 @@ class Simulation:
             if v.permit and v.path_id == self.network.paths[v.permit].outgoing and v.s >= v.spec.length/2+.75:
                 v.permit = None
         snapshot = [(v, v.path_id, v.s) for v in self.vehicles]
+        four=getattr(self.network,'lane_count',2)==4
+        if four:
+            from . import lane_changes
+            lane_changes.build_index(self)
         if self.ticks % DECISION_STEPS == 0 or changed:
             self._decide(snapshot)
             from . import wrong_way
-            for v in self.vehicles:
-                self.flow_audit.inspect(self,v)
-                overtaking.decide(self,v)
-                wrong_way.decide(self,v)
+            if four:
+                lane_changes.decide_all(self)
+                from .four_wrong_way import decide as wrong_decide
+                for v in self.vehicles:wrong_decide(self,v)
+            else:
+                for v in self.vehicles:
+                    self.flow_audit.inspect(self,v)
+                    overtaking.decide(self,v)
+                    wrong_way.decide(self,v)
             self.wrong_way_actors=[v for v in self.vehicles if v.manoeuvre and v.manoeuvre_mode=='wrong_way']
             for v in self.vehicles:wrong_way.observe_oncoming(self,v)
             snapshot=[(v,v.path_id,v.s) for v in self.vehicles]
+            if four:lane_changes.build_index(self)
+            if four:
+                from .collision_audit import sample
+                sample(self)
         updates = []
         for v in self.vehicles:
             p = self.network.paths[v.path_id]
@@ -539,13 +590,20 @@ class Simulation:
                 v.stop_status='In service'
             if v.index == len(v.route)-1 and v.end_s is not None:
                 available=min(available,max(0.,v.end_s-v.s))
-            if p.kind == 'lane' and v.index+1 < len(v.route) and v.permit != v.route[v.index+1]:
+            if p.kind == 'lane' and v.index+1 < len(v.route) and v.route[v.index+1] in self.network.connectors and v.permit != v.route[v.index+1]:
                 available = min(available, p.length-v.spec.length/2-.5-v.s)
-            cruise = v.desired_speed if p.kind == 'lane' else min(6.,v.desired_speed)
+            merge_gap=lane_changes.merge_limit(self,v) if four else math.inf
+            available=min(available,merge_gap)
+            link_gap=math.inf
+            if four and p.kind=='lane' and v.index+1<len(v.route) and self.network.paths[v.route[v.index+1]].kind=='lane_change' and v.change_grant!=v.route[v.index+1]:
+                link_gap=max(0.,p.length-v.s-.1)
+                available=min(available,link_gap)
+            cruise = v.desired_speed if p.kind in ('lane','lane_change') else min(6.,v.desired_speed)
             if self.mode=='accident' and v.driver.kind!='Normal':
                 # Imperfect drivers execute Prolog control using stale perception.
                 # No actual-gap or stop-line travel clamp may erase this motion.
                 target=0. if v.control in ('wait','brake') else cruise
+                if four:target=min(target,math.sqrt(2*v.spec.braking*max(0.,min(merge_gap,link_gap))))
                 if v.manoeuvre:
                     # The Prolog passing state authorizes motion around the leader.
                     target=cruise
@@ -564,6 +622,7 @@ class Simulation:
                 target=min(target,math.sqrt(2*v.spec.braking*max(0.,service)))
                 speed=min(target,v.speed+v.spec.acceleration*motor*STEP) if target>=v.speed else max(target,v.speed-deceleration*STEP)
                 travel=speed*STEP
+                if four:travel=min(travel,merge_gap,link_gap)
                 if v.manoeuvre and not v.manoeuvre['returning'] and travel>p.length-v.s:
                     travel=max(0.,p.length-v.s);speed=0.
                     self.supervisor.record(v,'opposing_lane_end_guard')
@@ -581,7 +640,8 @@ class Simulation:
             if travel < speed*STEP:
                 speed = travel/STEP
             updates.append((v, v.s+travel, speed))
-        updates=self.supervisor.movement(self,updates) if self.mode=='supervised' else collide(self,updates)
+        with self.timings.measure('collisions'):
+            updates=self.supervisor.movement(self,updates) if self.mode=='supervised' else collide(self,updates)
         finished = []
         for v, s, speed in updates:
             self.behaviour_audit.motion(self,v,max(0.,s-v.s))
@@ -591,9 +651,10 @@ class Simulation:
             elif speed<.05: self.metrics.wait+=STEP
             v.executed='crashed' if v.crashed else ('wait' if s-v.s<1e-8 else ('brake' if speed<v.speed-1e-6 else 'proceed'))
             v.s, v.speed = s, speed
+            if four and self.network.paths[v.path_id].kind in ('lane_change','opposing'):self.metrics.enter(v,self.network)
             if self.mode=='accident' and v.driver.kind!='Normal' and not v.crashed:
                 p=self.network.paths[v.path_id]
-                if p.kind=='lane' and not v.manoeuvre and v.index+1<len(v.route) and not v.permit and v.s>=p.length-v.spec.length/2:
+                if p.kind=='lane' and not v.manoeuvre and v.index+1<len(v.route) and v.route[v.index+1] in self.network.connectors and not v.permit and v.s>=p.length-v.spec.length/2:
                     v.permit=v.route[v.index+1]
                     cp=self.network.paths[v.permit]
                     if cp.kind=='signal' and self.signals[cp.junction].light(cp.approach)=='red':
@@ -610,7 +671,9 @@ class Simulation:
                 if v.index == len(v.route)-1:
                     finished.append(v.id)
                     break
+                previous=v.path_id
                 v.index += 1
+                if four:lane_changes.transition(self,v,previous)
                 self.metrics.enter(v,self.network)
         self.remove_vehicles(finished,'trip_completion')
         if self.ticks % DECISION_STEPS == 0 and self.pending:

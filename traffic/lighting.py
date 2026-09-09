@@ -14,11 +14,14 @@ def make_shader():
     from ursina.shaders import lit_with_shadows_shader as day
     uniforms='''
 uniform float night_amount;
+uniform float city_shadows;
+uniform float city_optimized;
 uniform float city_extent;
 uniform sampler2D street_irradiance;
 uniform vec4 headlights[8];
 '''
     lighting='''
+    if (night_amount > 0.001 || city_optimized < 0.5) {
     vec4 material = texture(p3d_Texture0, texcoords) * p3d_ColorScale * vertex_color;
     vec2 uv = (vertex_world_position.xz + vec2(city_extent)) / (2.0*city_extent);
     vec3 lamps = texture(street_irradiance, uv).rgb;
@@ -33,8 +36,16 @@ uniform vec4 headlights[8];
     }
     fragment_color.rgb = mix(max(fragment_color.rgb,vec3(0.0)),
         material.rgb*illumination,night_amount);
+    }
 '''
     fragment=day.fragment.replace('uniform sampler2D p3d_Texture0;',uniforms+'\nuniform sampler2D p3d_Texture0;')
+    fragment=fragment.replace('fragment_color = cast_shadows(fragment_color);','''
+    if (city_shadows > 0.5) fragment_color = cast_shadows(fragment_color);
+    else {
+        vec3 L = normalize(p3d_LightSource[0].position.xyz-vertex_position*p3d_LightSource[0].position.w);
+        fragment_color.rgb *= 0.65+0.35*max(0.0,dot(normalize(normal_vector),L));
+    }
+''')
     fragment=fragment.replace('    float distance_to_camera',lighting+'\n    float distance_to_camera')
     return Shader(name='city_day_night',vertex=day.vertex,fragment=fragment,
                   default_input=dict(day.default_input))
@@ -79,12 +90,22 @@ class Lighting:
         scene.set_shader_input('city_extent',extent)
         scene.set_shader_input('headlights',self.headlights)
         scene.set_shader_input('night_amount',0.)
+        scene.set_shader_input('city_shadows',1.)
+        scene.set_shader_input('city_optimized',0.)
         self.day=1.
+        self.optimized=True;self.quality=False;self.selected=[];self.next_selection=0
 
     def sync(self,sim,focus):
         from ursina import scene,window,color,Vec3
         from panda3d.core import LVecBase4f
+        from time import perf_counter
         self.day=daylight(sim.clock);night=1-self.day
+        if self.optimized:
+            shadows=getattr(self,'forced_shadows',None)
+            if shadows is None:shadows=self.quality and self.day>.01
+            if self.sun.shadows!=shadows:self.sun.shadows=shadows
+        scene.set_shader_input('city_shadows',1. if self.sun.shadows else 0.)
+        scene.set_shader_input('city_optimized',1. if self.optimized else 0.)
         scene.set_shader_input('night_amount',night)
         self.sun.color=color.rgba(self.day,self.day*.98,self.day*.92,1)
         # Below the horizon after sunset, with exactly zero sun intensity.
@@ -95,11 +116,23 @@ class Lighting:
             self.last=direction
         self.ambient.color=color.rgba(.12+.4*self.day,.15+.42*self.day,.23+.38*self.day,1)
         window.color=color.rgba(.018+.758*self.day,.027+.839*self.day,.065+.782*self.day,1)
-        for bulb in self.bulbs:bulb.color=color.rgba(.3+.7*night,.28+.55*night,.2+.3*night,1)
-        cars=sorted((v for v in sim.vehicles if not v.crashed),
-                    key=lambda v:math.dist(sim.pose(v)[:2],(focus.x,focus.z)))[:8]
+        tint=round(night,2)
+        if not self.optimized or tint!=getattr(self,'bulb_tint',None):
+            for bulb in self.bulbs:bulb.color=color.rgba(.3+.7*night,.28+.55*night,.2+.3*night,1)
+            self.bulb_tint=tint
+        now=perf_counter();live={v.id:v for v in sim.vehicles if not v.crashed}
+        if not self.optimized or now>=self.next_selection or any(vid not in live for vid in self.selected):
+            # Retained lights receive a 12 m preference to prevent selection flicker.
+            self.selected=[v.id for v in sorted(live.values(),key=lambda v:
+                math.dist(sim.pose(v)[:2],(focus.x,focus.z))-(12 if v.id in self.selected else 0))[:8]]
+            self.next_selection=now+.1
+        cars=[live[vid] for vid in self.selected if vid in live]
         for i in range(8):
             if i<len(cars) and night>.01:
-                x,z,yaw=sim.pose(cars[i]);a=math.radians(yaw)
+                x,z,yaw=sim.visual_pose(cars[i]) if self.optimized else sim.pose(cars[i]);a=math.radians(yaw)
+                # Cone origin follows the same interpolated front bumper as
+                # the visible lamps, rather than projecting from the cabin.
+                front=cars[i].spec.length/2-.05
+                x+=math.sin(a)*front;z+=math.cos(a)*front
                 self.headlights[i]=LVecBase4f(x,z,math.sin(a),math.cos(a))
             else:self.headlights[i]=LVecBase4f(10000,10000,0,0)

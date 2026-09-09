@@ -8,6 +8,7 @@ from ursina import Entity, Text, Button, Slider, camera, color, mouse, window
 class Interface:
     def __init__(self, sim, reset, home, scenario):
         self.sim, self.selected = sim, None
+        self.follow_id=None
         self.suppress = False
         self.setup = Entity(parent=camera.ui,z=-.3,enabled=False)
         Entity(parent=self.setup,model='quad',origin=(-.5,.5),position=(-.015,.30,.1),scale=(.34,.67),color=color.hex('#203742'),collider='box')
@@ -41,12 +42,27 @@ class Interface:
         for i,name in enumerate(('None','Road usage','Accidents')):
             Button(parent=self.root,text=name,position=(.04+i*.113,.04),scale=(.108,.035),text_size=.7,color=color.hex('#42666c'),on_click=lambda name=name:setattr(self.sim,'overlay',name))
         self.legend=self.label('',.01,.65)
+        for i,(label,factor) in enumerate((('Scale /2',.5),('Scale x2',2))):
+            Button(parent=self.root,text=label,position=(.08+i*.15,-.047),scale=(.13,.025),text_size=.55,
+                color=color.hex('#42666c'),on_click=lambda factor=factor:setattr(sim,'heat_scale',max(.25,min(8,sim.heat_scale*factor))))
         for i,tint in enumerate(('#42666c','#b9b551','#e67946','#ce4144')):
             Entity(parent=self.root,model='quad',position=(.035+i*.075,-.066),scale=(.065,.009),color=color.hex(tint))
         self.local = Slider(parent=self.root,min=5,max=120,default=30,step=1,dynamic=True,position=(.01,-.36),scale=.56,text='')
         self.local.on_value_changed = self.request_local
         self.use_global = Button(parent=self.root,text='Use global timing',position=(.15,-.431),scale=(.29,.045),color=color.hex('#42666c'),on_click=self.remove_override)
+        self.feed=Entity(parent=camera.ui)
+        Entity(parent=self.feed,model='quad',origin=(-.5,.5),position=(-.015,-.26,.1),scale=(.34,.20),color=color.hex('#203742'),collider='box')
+        Text(parent=self.feed,text='MANOEUVRES',y=-.275,scale=.75,color=color.hex('#ffdc8c'))
+        self.feed_rows=[Button(parent=self.feed,text='',position=(.15,-.31-i*.032),scale=(.31,.026),text_size=.55,
+                              color=color.hex('#42666c')) for i in range(3)]
+        self.follow_button=Button(parent=self.feed,text='Follow selected',position=(.15,-.425),scale=(.30,.035),text_size=.65,
+                                  color=color.hex('#42666c'),on_click=self.toggle_follow)
         self.sync()
+
+    def toggle_follow(self):
+        if self.follow_id is not None:self.follow_id=None
+        elif self.selected and self.selected[0]=='vehicle':self.follow_id=self.selected[1]
+        elif self.sim.event_feed:self.follow_id=self.sim.event_feed[-1]['id']
 
     def switch_mode(self,scenario):
         self.sim.mode='supervised' if self.sim.mode=='accident' else 'accident'
@@ -63,7 +79,7 @@ class Interface:
 
     def blocks_pointer(self):
         return (any(s.knob.dragging for s in (self.slider,self.population,self.local))
-                or mouse.y > .325 or (self.setup.enabled and mouse.x > window.aspect_ratio/2-.37 and -.38<mouse.y<.31) or (mouse.x < -window.aspect_ratio/2+.365 and mouse.y < .32))
+                or mouse.y > .325 or (mouse.x>window.aspect_ratio/2-.37 and -.46<mouse.y<-.26) or (self.setup.enabled and mouse.x > window.aspect_ratio/2-.37 and -.38<mouse.y<.31) or (mouse.x < -window.aspect_ratio/2+.365 and mouse.y < .32))
 
     def select(self, kind, key):
         if self.blocks_pointer():
@@ -91,6 +107,7 @@ class Interface:
 
     def reset_controls(self):
         self.selected=None
+        self.follow_id=None
         self.population.value=40
         self.slider.value=30
         self.suppress=True
@@ -98,11 +115,25 @@ class Interface:
         self.suppress=False
 
     def sync(self):
+        from time import perf_counter
+        now=perf_counter()
+        key=(id(self.sim.metrics),self.selected,self.follow_id,self.sim.paused,self.sim.overlay,self.sim.heat_scale,window.aspect_ratio)
+        if getattr(self,'optimized',True) and key==getattr(self,'_sync_key',None) and now<getattr(self,'_next_sync',0):return
+        self._sync_key=key;self._next_sync=now+.1
         left=-window.aspect_ratio/2+.03
         self.header.scale_x=window.aspect_ratio
         self.title.x=self.summary.x=left
         self.root.x=left
         self.setup.x=window.aspect_ratio/2-.34
+        self.feed.x=window.aspect_ratio/2-.34;self.feed.enabled=not self.setup.enabled
+        if self.follow_id is not None and not any(v.id==self.follow_id for v in self.sim.vehicles):self.follow_id=None
+        self.follow_button.text='Stop following / Esc' if self.follow_id is not None else 'Follow selected / latest'
+        events=list(reversed(self.sim.event_feed))[:3]
+        for i,row in enumerate(self.feed_rows):
+            row.enabled=i<len(events)
+            if i<len(events):
+                item=events[i];row.text=f'{item["time"]:.1f}s #{item["id"]} {item["kind"].replace("overtaking","pass")} {item["stage"]}'
+                row.on_click=lambda vid=item['id']:self.set_selection('vehicle',vid)
         self.setup_button.x=window.aspect_ratio/2-.25
         self.pause.x=self.reset_button.x=window.aspect_ratio/2-.085
         self.home_button.x=window.aspect_ratio/2-.25
@@ -127,9 +158,13 @@ class Interface:
         if self.sim.overlay=='None':
             self.legend.text='Overlay off | cumulative since reset'
         elif self.sim.overlay=='Road usage':
-            self.legend.text=f'Lane entries | since reset ({self.sim.elapsed:.0f}s)\nFixed bins: 0 / 1-24 / 25-49 / 50+\nInitial entries included; no connectors'
+            from .heatmaps import thresholds
+            a,b=thresholds(self.sim.overlay,self.sim.heat_scale)
+            self.legend.text=f'Lane segments | since reset ({self.sim.elapsed:.0f}s)\nYellow 1-{a-1} / orange {a}-{b-1} / red {b}+\nZero transparent | scale {self.sim.heat_scale:g}'
         else:
-            self.legend.text=f'Incidents / 16m cell | since reset ({self.sim.elapsed:.0f}s)\nFixed bins: 0 / 1-2 / 3-4 / 5+\nZero is transparent; origins persist'
+            from .heatmaps import thresholds
+            a,b=thresholds(self.sim.overlay,self.sim.heat_scale)
+            self.legend.text=f'Incident origins | since reset ({self.sim.elapsed:.0f}s)\nYellow 1-{a-1} / orange {a}-{b-1} / red {b}+\nZero transparent | scale {self.sim.heat_scale:g}'
         self.population_label.text=f'Target population: {self.sim.target}'
         pending=sum(s.active_green != s.requested_green for s in self.sim.signals.values())
         self.global_label.text=f'Global green: {self.sim.global_green:.0f}s\nPending at {pending} signals'
@@ -163,6 +198,11 @@ class Interface:
                     (f'{removal["reason"].replace("_"," ")}\nAt {removal["time"]:.1f}s\nDestination: {removal["destination"]}'
                      if removal else 'Not active in this run.')+'\nSelect another vehicle.')
 
+        elif kind=='lane':
+            p=self.sim.network.paths[key]
+            self.inspector.text=f'LANE SEGMENT\n{fill(key,30)}\n\nPassages: {self.sim.metrics.usage[key]}\nSince reset: {self.sim.elapsed:.1f}s\nDirection: {p.source} > {p.target}\nLane: {getattr(p,"lane","single")}\nLength: {p.length:.1f} m'
+        elif kind=='cell':
+            self.inspector.text=f'ACCIDENT CELL {key}\n\nUnique origins: {self.sim.incidents.cells[key]}\n16 m x 16 m\nSince reset: {self.sim.elapsed:.1f}s\nClearance does not erase history.'
         elif kind == 'incident':
             r=self.sim.incidents.records[key-1] if key<=len(self.sim.incidents.records) else None
             if r:

@@ -1,4 +1,10 @@
-:- module(traffic_rules, [decide/12, behave/19, drive/10, passing/8, wrong_way/8]).
+:- module(traffic_rules, [decide/12, behave/19, drive/10, passing/8, wrong_way/8, lane_change/8]).
+
+lane_change(_,_,_,false,_,_,hold,change_zone_protected) :- !.
+lane_change(N,P,R,true,S,Risk,change,Reason) :-
+    (S=true; Risk=true), (N=true; P=true; R=true), !,
+    (N=true -> Reason=planned_lane; P=true -> Reason=same_direction_pass; Reason=outer_lane_return).
+lane_change(_,_,_,_,_,_,hold,target_lane_gap).
 
 wrong_way(follow,true,true,_,_,_,assess,wrong_way_assessment) :- !.
 wrong_way(assess,true,true,_,true,_,move_out,centre_line_crossing) :- !.
